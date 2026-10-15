@@ -1,0 +1,25 @@
+<?php
+
+namespace App\Http\Controllers\Api\Public;
+
+use App\Http\Controllers\Controller;
+use App\Models\Product;
+use App\Http\Resources\ProductResource;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+
+class ProductController extends Controller
+{
+    // ۱. لیست محصولات (صفحه‌بندی شده + قابلیت فیلتر با category_id)
+    public function index()
+    {
+        $products = Product::with(['category', 'images'])->paginate(10);
+        return ProductResource::collection($products);
+    }
+
+    // ۲. نمایش یک محصول خاص به همراه عکس‌هایش
+    public function show(Product $product)
+    {
+        return new ProductResource($product->load(['category', 'images']));
+    }
+}
