@@ -14,7 +14,14 @@ class ProductController extends Controller
     public function index()
     {
         $products = Product::with(['category', 'images'])->paginate(10);
-        return ProductResource::collection($products);
+        $response = ProductResource::collection($products)
+            ->response()
+            ->getData(true);
+
+        $response['products'] = $response['data'];
+        unset($response['data']);
+
+        return response()->json($response);
     }
 
     // ۲. نمایش یک محصول خاص به همراه عکس‌هایش

@@ -12,7 +12,7 @@ class ProductResource extends JsonResource
     {
         return [
             'id' => $this->id,
-            'name' => $this->name,
+            'title' => $this->name,
             'price' => $this->price,
             // استفاده از ریسورس دسته‌بندی برای ارتباط
             'category' => new CategoryResource($this->whenLoaded('category')),
