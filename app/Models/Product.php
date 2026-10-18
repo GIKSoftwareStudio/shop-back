@@ -11,7 +11,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 class Product extends Model
 {
     use HasFactory;
-    protected $fillable = ['category_id', 'name', 'price'];
+    protected $fillable = ['category_id', 'name', 'price', 'stock'];
 
     // ارتباط برعکس با دسته‌بندی
     public function category(): BelongsTo
