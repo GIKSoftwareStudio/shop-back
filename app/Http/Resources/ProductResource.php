@@ -14,6 +14,7 @@ class ProductResource extends JsonResource
             'id' => $this->id,
             'title' => $this->name,
             'price' => $this->price,
+            'stock' => $this->stock,
             // استفاده از ریسورس دسته‌بندی برای ارتباط
             'category' => new CategoryResource($this->whenLoaded('category')),
             // استفاده از کالکشن ریسورس تصاویر برای ارتباط چندتایی
