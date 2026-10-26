@@ -11,9 +11,21 @@ use Illuminate\Http\Request;
 class ProductController extends Controller
 {
     // ۱. لیست محصولات (صفحه‌بندی شده + قابلیت فیلتر با category_id)
-    public function index()
+
+    public function index(Request $request)
     {
-        $products = Product::with(['category', 'images'])->paginate(10);
+        $request->validate([
+            'category_id' => ['sometimes', 'integer', 'exists:categories,id'],
+        ]);
+
+        $query = Product::with(['category', 'images']);
+
+        if ($request->filled('category_id')) {
+            $query->where('category_id', $request->integer('category_id'));
+        }
+
+        $products = $query->paginate(10)->withQueryString();
+
         $response = ProductResource::collection($products)
             ->response()
             ->getData(true);
@@ -23,6 +35,7 @@ class ProductController extends Controller
 
         return response()->json($response);
     }
+
 
     // ۲. نمایش یک محصول خاص به همراه عکس‌هایش
     public function show(Product $product)
