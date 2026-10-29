@@ -41,15 +41,7 @@ class CheckoutController extends Controller
                     ]);
                 }
 
-                $priceParts = explode('.', (string) $product->price);
-                $whole = (int) $priceParts[0];
-                $fraction = (int) str_pad(
-                    substr($priceParts[1] ?? '0', 0, 2),
-                    2,
-                    '0'
-                );
-
-                $unitPriceCents = ($whole * 100) + $fraction;
+                $unitPriceCents = (int) round(((float) $product->price) * 100);
                 $totalCents += $unitPriceCents * $quantity;
 
                 $orderItems[] = [
