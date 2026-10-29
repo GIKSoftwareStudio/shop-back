@@ -13,7 +13,8 @@ class ProductFactory extends Factory
         return [
             'category_id' => Category::factory(), // در صورت نیاز دسته‌بندی می‌سازد
             'name' => fake()->words(3, true), // نام محصول (۳ کلمه‌ای)
-            'price' => fake()->randomFloat(2, 10, 1000), // قیمت بین 10 تا 1000
+            'price' => fake()->randomFloat(2, 10000, 5000000), // قیمت به تومان
+            'stock' => fake()->numberBetween(0, 100), // موجودی
         ];
     }
 }
