@@ -26,7 +26,14 @@ class ProductController extends Controller
 
         $products = $query->paginate(10)->withQueryString();
 
-        return ProductResource::collection($products);
+        $response = ProductResource::collection($products)
+            ->response()
+            ->getData(true);
+
+        $response['products'] = $response['data'];
+        unset($response['data']);
+
+        return response()->json($response);
     }
 
 
