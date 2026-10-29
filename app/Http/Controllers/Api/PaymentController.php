@@ -7,6 +7,7 @@ use App\Models\Order;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
+use App\Models\Product;
 
 class PaymentController extends Controller
 {
@@ -84,9 +85,10 @@ class PaymentController extends Controller
             }
 
             foreach ($order->items as $item) {
-                $product = \App\Models\Product::whereKey(
-                    $item->product_id
-                )->lockForUpdate()->first();
+                $product = Product::withTrashed()
+                    ->whereKey($item->product_id)
+                    ->lockForUpdate()
+                    ->first();
 
                 if ($product) {
                     $product->increment('stock', $item->quantity);
