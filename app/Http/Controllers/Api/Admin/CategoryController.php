@@ -53,12 +53,6 @@ class CategoryController extends Controller
     // ۵. حذف دسته‌بندی
     public function destroy(Category $category): JsonResponse
     {
-        if ($category->products()->exists()) {
-            return response()->json([
-                'message' => 'این دسته‌بندی محصول دارد. ابتدا محصولات را حذف یا جابه‌جا کنید.',
-            ], 409);
-        }
-
         $category->delete();
 
         return response()->json([
