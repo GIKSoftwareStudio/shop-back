@@ -37,9 +37,8 @@ Route::prefix('admin')->group(function () {
     Route::apiResource('categories', AdminCategoryController::class);
     Route::apiResource('products', AdminProductController::class);
 });
-// پرداخت شبیه‌سازی‌شده
-Route::get('/payment/simulate/{token}', [PaymentController::class, 'simulate']);
 
-// دریافت نتیجه پرداخت از وب‌هوک
-Route::post('/webhooks/payment', [PaymentController::class, 'webhook']);
+// بازگشت از درگاه پرداخت زرین‌پال
+Route::get('/payment/callback', [PaymentController::class, 'callback']);
+
 Route::get('/admin/orders', [OrderController::class, 'index']);

@@ -4,86 +4,84 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Order;
+use App\Models\Product;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Validation\ValidationException;
-use App\Models\Product;
+use Illuminate\Support\Facades\Http;
 
 class PaymentController extends Controller
 {
-    public function simulate(string $token)
+    public function callback(Request $request)
     {
-        $order = Order::where('payment_token', $token)->firstOrFail();
+        $authority = $request->query('Authority');
+        $status = $request->query('Status');
+
+        if (! $authority) {
+            return response()->json(['message' => 'پارامتر Authority یافت نشد.'], 400);
+        }
+
+        $order = Order::where('payment_token', $authority)->first();
+
+        if (! $order) {
+            return response()->json(['message' => 'سفارش یافت نشد.'], 404);
+        }
 
         if ($order->status !== 'pending') {
             return response()->json([
-                'message' => 'این سفارش در انتظار پرداخت نیست.',
+                'message' => 'وضعیت این سفارش قبلاً تعیین شده است.',
                 'status' => $order->status,
             ], 409);
         }
 
+        if ($status !== 'OK') {
+            $this->restoreStockAndFail($order);
+
+            return response()->json([
+                'message' => 'پرداخت ناموفق بود؛ موجودی کالاها برگشت داده شد.',
+                'order_id' => $order->id,
+                'status' => 'failed',
+            ]);
+        }
+
+        // Verify با زرین‌پال
+        $amountInRial = (int) round(((float) $order->total_amount) * 10);
+
+        $response = Http::withHeaders([
+            'Content-Type' => 'application/json',
+            'Accept' => 'application/json',
+        ])->post('https://sandbox.zarinpal.com/pg/v4/payment/verify.json', [
+            'merchant_id' => config('zarinpal.merchant_id'),
+            'amount' => $amountInRial,
+            'authority' => $authority,
+        ]);
+
+        $verifyResult = $response->json();
+
+        if (
+            $response->failed() ||
+            ($verifyResult['data']['code'] ?? null) !== 100
+        ) {
+            $this->restoreStockAndFail($order);
+
+            return response()->json([
+                'message' => 'تأیید پرداخت ناموفق بود؛ موجودی کالاها برگشت داده شد.',
+                'error' => $verifyResult['errors'] ?? 'unknown',
+            ], 502);
+        }
+
+        $order->update(['status' => 'paid']);
+
         return response()->json([
-            'message' => 'پرداخت شبیه‌سازی‌شده آماده است.',
+            'message' => 'پرداخت با موفقیت تأیید شد.',
             'order_id' => $order->id,
-            'amount' => $order->total_amount,
-            'payment_token' => $order->payment_token,
-            'instructions' => [
-                'برای پرداخت موفق، POST /api/webhooks/payment را با status=success فراخوانی کنید.',
-                'برای پرداخت ناموفق، POST /api/webhooks/payment را با status=failure فراخوانی کنید.',
-            ],
+            'ref_id' => $verifyResult['data']['ref_id'],
+            'status' => 'paid',
         ]);
     }
 
-    public function webhook(Request $request)
+    private function restoreStockAndFail(Order $order): void
     {
-        $secret = config('services.payment.webhook_secret');
-
-        if (
-            empty($secret) ||
-            ! hash_equals($secret, (string) $request->header('X-Payment-Secret'))
-        ) {
-            return response()->json([
-                'message' => 'دسترسی غیرمجاز است.',
-            ], 401);
-        }
-
-        $validated = $request->validate([
-            'payment_token' => ['required', 'uuid'],
-            'status' => ['required', 'in:success,failure'],
-        ]);
-
-        return DB::transaction(function () use ($validated) {
-            $order = Order::where(
-                'payment_token',
-                $validated['payment_token']
-            )->lockForUpdate()->first();
-
-            if (!$order) {
-                throw ValidationException::withMessages([
-                    'payment_token' => 'توکن پرداخت معتبر نیست.',
-                ]);
-            }
-
-            if ($order->status !== 'pending') {
-                return response()->json([
-                    'message' => 'وضعیت این سفارش قبلاً تعیین شده است.',
-                    'order_id' => $order->id,
-                    'status' => $order->status,
-                ], 409);
-            }
-
-            if ($validated['status'] === 'success') {
-                $order->update([
-                    'status' => 'paid',
-                ]);
-
-                return response()->json([
-                    'message' => 'پرداخت با موفقیت تأیید شد.',
-                    'order_id' => $order->id,
-                    'status' => $order->status,
-                ]);
-            }
-
+        DB::transaction(function () use ($order) {
             foreach ($order->items as $item) {
                 $product = Product::withTrashed()
                     ->whereKey($item->product_id)
@@ -95,15 +93,7 @@ class PaymentController extends Controller
                 }
             }
 
-            $order->update([
-                'status' => 'failed',
-            ]);
-
-            return response()->json([
-                'message' => 'پرداخت ناموفق بود؛ موجودی کالاها برگشت داده شد.',
-                'order_id' => $order->id,
-                'status' => $order->status,
-            ]);
+            $order->update(['status' => 'failed']);
         });
     }
 }

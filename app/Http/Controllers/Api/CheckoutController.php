@@ -7,10 +7,8 @@ use App\Http\Requests\CheckoutRequest;
 use App\Models\Order;
 use App\Models\Product;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Validation\ValidationException;
-use Illuminate\Http\Request;
-
 
 class CheckoutController extends Controller
 {
@@ -27,7 +25,7 @@ class CheckoutController extends Controller
                     ->lockForUpdate()
                     ->first();
 
-                if (!$product) {
+                if (! $product) {
                     throw ValidationException::withMessages([
                         'items' => 'یکی از محصولات دیگر وجود ندارد.',
                     ]);
@@ -69,7 +67,7 @@ class CheckoutController extends Controller
                 'user_id' => auth()->id(),
                 'total_amount' => $totalAmount,
                 'status' => 'pending',
-                'payment_token' => (string) Str::uuid(),
+                'payment_token' => null,
             ]);
 
             $order->items()->createMany($orderItems);
@@ -77,17 +75,59 @@ class CheckoutController extends Controller
             return $order;
         });
 
+        // درخواست به زرین‌پال (مستقیم با Http)
+        $merchantId = config('zarinpal.merchant_id');
+        $callbackUrl = url('/api/payment/callback');
+        $amountInRial = (int) round(((float) $order->total_amount) * 10); // تومان → ریال
+
+        $response = Http::withHeaders([
+            'Content-Type' => 'application/json',
+            'Accept' => 'application/json',
+        ])->post('https://sandbox.zarinpal.com/pg/v4/payment/request.json', [
+            'merchant_id' => $merchantId,
+            'amount' => $amountInRial,
+            'description' => 'پرداخت سفارش #' . $order->id,
+            'callback_url' => $callbackUrl,
+        ]);
+
+        $zarinpalResult = $response->json();
+
+        if (
+            $response->failed() ||
+            empty($zarinpalResult['data']['authority'])
+        ) {
+            DB::transaction(function () use ($order) {
+                foreach ($order->items as $item) {
+                    $product = Product::withTrashed()
+                        ->whereKey($item->product_id)
+                        ->lockForUpdate()
+                        ->first();
+
+                    if ($product) {
+                        $product->increment('stock', $item->quantity);
+                    }
+                }
+
+                $order->update(['status' => 'failed']);
+            });
+
+            return response()->json([
+                'message' => 'خطا در اتصال به درگاه پرداخت. لطفاً دوباره تلاش کنید.',
+                'error' => $zarinpalResult['errors'] ?? 'unknown',
+            ], 502);
+        }
+
+        $authority = $zarinpalResult['data']['authority'];
+        $order->update(['payment_token' => $authority]);
+
         return response()->json([
             'message' => 'سفارش با موفقیت ثبت شد.',
             'order' => [
                 'id' => $order->id,
                 'total_amount' => $order->total_amount,
                 'status' => $order->status,
-                'payment_token' => $order->payment_token,
             ],
-            'payment_url' => url(
-                '/api/payment/simulate/' . $order->payment_token
-            ),
+            'payment_url' => 'https://sandbox.zarinpal.com/pg/StartPay/' . $authority,
         ], 201);
     }
 }

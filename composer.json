@@ -7,6 +7,7 @@
     "license": "MIT",
     "require": {
         "php": "^8.3",
+        "abolfazlahmadiweb/laravel-zarinpal": "^1.0",
         "dedoc/scramble": "^0.13.49",
         "laravel/framework": "^13.17",
         "laravel/sanctum": "^4.0",

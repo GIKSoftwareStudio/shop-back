@@ -4,8 +4,67 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "0750c09cf6412f0d5ec98809e72cea7e",
+    "content-hash": "17f77968135798ef7712f3444062d716",
     "packages": [
+        {
+            "name": "abolfazlahmadiweb/laravel-zarinpal",
+            "version": "v1.0.0",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/abolfazlahmadiweb/laravel-zarinpal.git",
+                "reference": "4124c4628d36114d7a79fd000af855d9f8efdc37"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/abolfazlahmadiweb/laravel-zarinpal/zipball/4124c4628d36114d7a79fd000af855d9f8efdc37",
+                "reference": "4124c4628d36114d7a79fd000af855d9f8efdc37",
+                "shasum": ""
+            },
+            "require": {
+                "illuminate/http": "^12.0|^13.0",
+                "illuminate/support": "^12.0|^13.0",
+                "php": "^8.2"
+            },
+            "type": "library",
+            "extra": {
+                "laravel": {
+                    "aliases": {
+                        "Zarinpal": "AbolfazlAhmadi\\LaravelZarinpal\\Facades\\Zarinpal"
+                    },
+                    "providers": [
+                        "AbolfazlAhmadi\\LaravelZarinpal\\ZarinpalServiceProvider"
+                    ]
+                }
+            },
+            "autoload": {
+                "psr-4": {
+                    "AbolfazlAhmadi\\LaravelZarinpal\\": "src/"
+                }
+            },
+            "notification-url": "https://packagist.org/downloads/",
+            "license": [
+                "MIT"
+            ],
+            "authors": [
+                {
+                    "name": "Abolfazl Ahmadi",
+                    "email": "abolfazlahmadiweb@gmail.com"
+                }
+            ],
+            "description": "Simple Laravel package for Zarinpal payment gateway.",
+            "homepage": "https://github.com/abolfazlahmadiweb/laravel-zarinpal",
+            "keywords": [
+                "gateway",
+                "laravel",
+                "payment",
+                "zarinpal"
+            ],
+            "support": {
+                "issues": "https://github.com/abolfazlahmadiweb/laravel-zarinpal/issues",
+                "source": "https://github.com/abolfazlahmadiweb/laravel-zarinpal/tree/v1.0.0"
+            },
+            "time": "2026-07-09T12:50:00+00:00"
+        },
         {
             "name": "brick/math",
             "version": "1.0.0",
