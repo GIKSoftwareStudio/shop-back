@@ -19,12 +19,6 @@ class CategoryController extends Controller
         return CategoryResource::collection(Category::all());
     }
 
-
-//    public function create()
-//    {
-//        //
-//    }
-
     // ۲. ذخیره دسته‌بندی جدید
     // استفاده از StoreCategoryRequest
     public function store(StoreCategoryRequest $request): JsonResponse
@@ -44,13 +38,6 @@ class CategoryController extends Controller
         return new CategoryResource($category);
     }
 
-
-//    public function edit(string $id)
-//    {
-//        //
-//    }
-
-
     // استفاده از UpdateCategoryRequest
     public function update(UpdateCategoryRequest $request, Category $category)
     {
@@ -66,6 +53,12 @@ class CategoryController extends Controller
     // ۵. حذف دسته‌بندی
     public function destroy(Category $category): JsonResponse
     {
+        if ($category->products()->exists()) {
+            return response()->json([
+                'message' => 'این دسته‌بندی محصول دارد. ابتدا محصولات را حذف یا جابه‌جا کنید.',
+            ], 409);
+        }
+
         $category->delete();
 
         return response()->json([
