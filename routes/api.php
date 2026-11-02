@@ -23,6 +23,7 @@ Route::get('/status', function () {
 
 // ۱. آدرس لیست دسته‌بندی‌ها
 Route::get('/categories', [CategoryController::class, 'index']);
+Route::get('/categories/{category}', [CategoryController::class, 'show']);
 
 // ۲. آدرس لیست محصولات و جزئیات یک محصول
 Route::get('/products', [ProductController::class, 'index']);
