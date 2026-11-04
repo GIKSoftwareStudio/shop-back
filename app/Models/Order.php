@@ -16,12 +16,18 @@ class Order extends Model
         'total_amount',
         'status',
         'payment_token',
+        'payment_reference',
+        'paid_at',
+        'verification_started_at',
+        'verification_token',
     ];
 
     protected function casts(): array
     {
         return [
             'total_amount' => 'decimal:2',
+            'paid_at' => 'datetime',
+            'verification_started_at' => 'datetime',
         ];
     }
 

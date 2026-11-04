@@ -12,3 +12,5 @@ storage/framework/views/*
 bootstrap/cache/*.php
 tests
 .phpunit.cache
+database/*.sqlite
+database/*.sqlite-*

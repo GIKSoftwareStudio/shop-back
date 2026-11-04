@@ -56,7 +56,7 @@ class CategoryController extends Controller
         $category->delete();
 
         return response()->json([
-            'message' => 'Category deleted successfully'
-        ]);
+            'message' => 'Category deleted successfully. Products have been preserved.',
+        ], 200);
     }
 }

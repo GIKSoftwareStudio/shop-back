@@ -5,74 +5,148 @@ namespace Tests\Feature;
 use App\Models\Category;
 use App\Models\Order;
 use App\Models\Product;
-use Illuminate\Database\QueryException;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\Request;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
-use Illuminate\Foundation\Testing\WithFaker;
+use App\Models\User;
+use Laravel\Sanctum\Sanctum;
 
 class CheckoutTest extends TestCase
 {
     use RefreshDatabase;
+
+    private const AUTHORITY = 'A00000000000000000000000000000000000';
 
     protected function setUp(): void
     {
         parent::setUp();
 
         config([
-            'services.payment.webhook_secret' => 'test-secret',
+            'zarinpal.sandbox' => true,
+            'zarinpal.currency' => 'IRT',
+            'zarinpal.merchant_id' => 'test-merchant-id',
+            'zarinpal.max_amount' => 200000000,
         ]);
 
-        $this->withHeader('X-Payment-Secret', 'test-secret');
+        // تمام درخواست‌های HTTP به پاسخ ساختگی هدایت می‌شوند.
+        // این پاسخ هم برای request و هم verify معتبر است.
+        Http::fake([
+            '*' => Http::response([
+                'data' => [
+                    'code' => 100,
+                    'authority' => self::AUTHORITY,
+                    'ref_id' => 123456789,
+                    'fee_type' => 'Merchant',
+                    'fee' => 0,
+                ],
+                'errors' => [],
+            ], 200),
+        ]);
     }
 
-    public function test_payment_webhook_rejects_request_without_secret(): void
-    {
-        $response = $this
-            ->withoutHeader('X-Payment-Secret')
-            ->postJson('/api/webhooks/payment', [
-                'payment_token' => '550e8400-e29b-41d4-a716-446655440000',
-                'status' => 'success',
-            ]);
-
-        $response->assertUnauthorized();
-    }
-
-    public function test_payment_webhook_rejects_invalid_secret(): void
-    {
-        $response = $this
-            ->withHeader('X-Payment-Secret', 'wrong-secret')
-            ->postJson('/api/webhooks/payment', [
-                'payment_token' => '550e8400-e29b-41d4-a716-446655440000',
-                'status' => 'success',
-            ]);
-
-        $response->assertUnauthorized();
-    }
-
-    public function test_checkout_fails_when_stock_is_insufficient(): void
-    {
+    private function createProduct(
+        string $price = '100.00',
+        int $stock = 5
+    ): Product {
         $category = Category::create([
             'name' => 'Test Category',
         ]);
 
-        $product = Product::create([
+        return Product::create([
             'category_id' => $category->id,
             'name' => 'Test Product',
-            'price' => 100.00,
-            'stock' => 2,
+            'price' => $price,
+            'stock' => $stock,
         ]);
+    }
 
-        $response = $this->postJson('/api/checkout', [
+    private function checkout(Product $product, int $quantity = 1)
+    {
+        Sanctum::actingAs(User::factory()->create());
+
+        return $this->postJson('/api/checkout', [
             'items' => [
                 [
                     'product_id' => $product->id,
-                    'quantity' => 3,
+                    'quantity' => $quantity,
                 ],
             ],
         ]);
+    }
 
-        $response->assertStatus(422);
+    private function getCallback(string $status = 'OK')
+    {
+        return $this->getJson(
+            '/api/payment/callback?Authority='
+            . self::AUTHORITY
+            . '&Status='
+            . $status
+        );
+    }
+
+    public function test_guest_cannot_checkout(): void
+    {
+        $product = $this->createProduct('100.00', 5);
+
+        $this->postJson('/api/checkout', [
+            'items' => [
+                [
+                    'product_id' => $product->id,
+                    'quantity' => 1,
+                ],
+            ],
+        ])->assertUnauthorized();
+
+        $this->assertDatabaseCount('orders', 0);
+
+        $this->assertDatabaseHas('products', [
+            'id' => $product->id,
+            'stock' => 5,
+        ]);
+    }
+
+    public function test_checkout_creates_order_and_reduces_stock(): void
+    {
+        $product = $this->createProduct('100.00', 5);
+
+        $response = $this->checkout($product, 2);
+
+        $response->assertCreated()
+            ->assertJsonPath('order.total_amount', '200.00')
+            ->assertJsonPath('order.status', 'pending');
+
+        $this->assertDatabaseHas('orders', [
+            'total_amount' => 200,
+            'status' => 'pending',
+            'payment_token' => self::AUTHORITY,
+        ]);
+
+        $this->assertDatabaseHas('products', [
+            'id' => $product->id,
+            'stock' => 3,
+        ]);
+
+        $this->assertDatabaseCount('order_items', 1);
+
+        $this->assertSame(
+            'https://sandbox.zarinpal.com/pg/StartPay/' . self::AUTHORITY,
+            $response->json('payment_url')
+        );
+
+        Http::assertSent(function (Request $request) {
+            return str_ends_with($request->url(), '/request.json')
+                && $request['amount'] === 2000;
+        });
+    }
+
+    public function test_checkout_rejects_insufficient_stock(): void
+    {
+        $product = $this->createProduct('100.00', 2);
+
+        $this->checkout($product, 3)
+            ->assertStatus(422);
 
         $this->assertDatabaseCount('orders', 0);
 
@@ -82,248 +156,27 @@ class CheckoutTest extends TestCase
         ]);
     }
 
-    public function test_checkout_creates_order_and_reduces_stock(): void
+    public function test_checkout_rejects_decimal_product_price(): void
     {
-        $category = Category::create([
-            'name' => 'Test Category',
-        ]);
+        $product = $this->createProduct('19.99', 10);
 
-        $product = Product::create([
-            'category_id' => $category->id,
-            'name' => 'Test Product',
-            'price' => 100.00,
-            'stock' => 5,
-        ]);
+        $this->checkout($product, 3)
+            ->assertStatus(422);
 
-        $response = $this->postJson('/api/checkout', [
-            'items' => [
-                [
-                    'product_id' => $product->id,
-                    'quantity' => 2,
-                ],
-            ],
-        ]);
-
-        $response->assertCreated()
-            ->assertJsonPath('order.total_amount', '200.00')
-            ->assertJsonPath('order.status', 'pending');
-
-        $this->assertDatabaseCount('orders', 1);
+        $this->assertDatabaseCount('orders', 0);
 
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
-            'stock' => 3,
-        ]);
-    }
-
-    public function test_successful_payment_marks_order_as_paid(): void
-    {
-        $category = Category::create([
-            'name' => 'Test Category',
-        ]);
-
-        $product = Product::create([
-            'category_id' => $category->id,
-            'name' => 'Test Product',
-            'price' => 100.00,
-            'stock' => 5,
-        ]);
-
-        $checkoutResponse = $this->postJson('/api/checkout', [
-            'items' => [
-                [
-                    'product_id' => $product->id,
-                    'quantity' => 1,
-                ],
-            ],
-        ]);
-
-        $checkoutResponse->assertCreated();
-
-        $token = $checkoutResponse->json('order.payment_token');
-
-        $paymentResponse = $this->postJson('/api/webhooks/payment', [
-            'payment_token' => $token,
-            'status' => 'success',
-        ]);
-
-        $paymentResponse->assertOk()
-            ->assertJsonPath('status', 'paid');
-
-        $this->assertDatabaseHas('orders', [
-            'payment_token' => $token,
-            'status' => 'paid',
-        ]);
-
-        $this->assertDatabaseHas('products', [
-            'id' => $product->id,
-            'stock' => 4,
-        ]);
-    }
-
-    public function test_payment_webhook_rejects_invalid_status(): void
-    {
-        $category = Category::create([
-            'name' => 'Test Category',
-        ]);
-
-        $product = Product::create([
-            'category_id' => $category->id,
-            'name' => 'Test Product',
-            'price' => '100.00',
-            'stock' => 5,
-        ]);
-
-        $checkoutResponse = $this->postJson('/api/checkout', [
-            'items' => [
-                [
-                    'product_id' => $product->id,
-                    'quantity' => 1,
-                ],
-            ],
-        ]);
-
-        $checkoutResponse->assertCreated();
-
-        $token = $checkoutResponse->json('order.payment_token');
-
-        $response = $this->postJson('/api/webhooks/payment', [
-            'payment_token' => $token,
-            'status' => 'unknown',
-        ]);
-
-        $response->assertUnprocessable();
-
-        $this->assertDatabaseHas('orders', [
-            'payment_token' => $token,
-            'status' => 'pending',
-        ]);
-
-        $this->assertDatabaseHas('products', [
-            'id' => $product->id,
-            'stock' => 4,
-        ]);
-    }
-
-    public function test_failed_payment_restores_product_stock(): void
-    {
-        $category = Category::create([
-            'name' => 'Test Category',
-        ]);
-
-        $product = Product::create([
-            'category_id' => $category->id,
-            'name' => 'Test Product',
-            'price' => 100.00,
-            'stock' => 5,
-        ]);
-
-        $checkoutResponse = $this->postJson('/api/checkout', [
-            'items' => [
-                [
-                    'product_id' => $product->id,
-                    'quantity' => 2,
-                ],
-            ],
-        ]);
-
-        $checkoutResponse->assertCreated();
-
-        $token = $checkoutResponse->json('order.payment_token');
-
-        // موجودی پس از ثبت سفارش باید 3 باشد.
-        $this->assertDatabaseHas('products', [
-            'id' => $product->id,
-            'stock' => 3,
-        ]);
-
-        $paymentResponse = $this->postJson('/api/webhooks/payment', [
-            'payment_token' => $token,
-            'status' => 'failure',
-        ]);
-
-        $paymentResponse->assertOk()
-            ->assertJsonPath('status', 'failed');
-
-        // پس از پرداخت ناموفق، موجودی باید به 5 برگردد.
-        $this->assertDatabaseHas('products', [
-            'id' => $product->id,
-            'stock' => 5,
-        ]);
-
-        $this->assertDatabaseHas('orders', [
-            'payment_token' => $token,
-            'status' => 'failed',
-        ]);
-    }
-
-    public function test_failed_payment_webhook_cannot_restore_stock_twice(): void
-    {
-        $category = Category::create([
-            'name' => 'Test Category',
-        ]);
-
-        $product = Product::create([
-            'category_id' => $category->id,
-            'name' => 'Test Product',
-            'price' => 100.00,
-            'stock' => 5,
-        ]);
-
-        $checkoutResponse = $this->postJson('/api/checkout', [
-            'items' => [
-                [
-                    'product_id' => $product->id,
-                    'quantity' => 2,
-                ],
-            ],
-        ]);
-
-        $checkoutResponse->assertCreated();
-
-        $token = $checkoutResponse->json('order.payment_token');
-
-        $payload = [
-            'payment_token' => $token,
-            'status' => 'failure',
-        ];
-
-        // بار اول: پرداخت ناموفق و بازگشت موجودی
-        $this->postJson('/api/webhooks/payment', $payload)
-            ->assertOk()
-            ->assertJsonPath('status', 'failed');
-
-        // بار دوم: درخواست تکراری باید رد شود
-        $this->postJson('/api/webhooks/payment', $payload)
-            ->assertStatus(409);
-
-        // موجودی باید دقیقاً 5 باقی مانده باشد.
-        $this->assertDatabaseHas('products', [
-            'id' => $product->id,
-            'stock' => 5,
-        ]);
-
-        // سفارش باید همچنان failed باشد.
-        $this->assertDatabaseHas('orders', [
-            'payment_token' => $token,
-            'status' => 'failed',
+            'stock' => 10,
         ]);
     }
 
     public function test_checkout_rejects_client_supplied_price(): void
     {
-        $category = Category::create([
-            'name' => 'Test Category',
-        ]);
+        Sanctum::actingAs(User::factory()->create());
+        $product = $this->createProduct();
 
-        $product = Product::create([
-            'category_id' => $category->id,
-            'name' => 'Test Product',
-            'price' => 100.00,
-            'stock' => 5,
-        ]);
-
-        $response = $this->postJson('/api/checkout', [
+        $this->postJson('/api/checkout', [
             'items' => [
                 [
                     'product_id' => $product->id,
@@ -331,139 +184,296 @@ class CheckoutTest extends TestCase
                     'price' => 1,
                 ],
             ],
-        ]);
-
-        $response->assertStatus(422);
-
-        $this->assertDatabaseCount('orders', 0);
-
-        $this->assertDatabaseHas('products', [
-            'id' => $product->id,
-            'stock' => 5,
-        ]);
-    }
-
-    public function test_successful_payment_webhook_cannot_be_processed_twice(): void
-    {
-        $category = Category::create([
-            'name' => 'Test Category',
-        ]);
-
-        $product = Product::create([
-            'category_id' => $category->id,
-            'name' => 'Test Product',
-            'price' => 100.00,
-            'stock' => 5,
-        ]);
-
-        // ثبت سفارش یک عدد محصول
-        $checkoutResponse = $this->postJson('/api/checkout', [
-            'items' => [
-                [
-                    'product_id' => $product->id,
-                    'quantity' => 1,
-                ],
-            ],
-        ]);
-
-        $checkoutResponse->assertCreated();
-
-        $token = $checkoutResponse->json('order.payment_token');
-
-        $payload = [
-            'payment_token' => $token,
-            'status' => 'success',
-        ];
-
-        // بار اول: پرداخت موفق
-        $this->postJson('/api/webhooks/payment', $payload)
-            ->assertOk()
-            ->assertJsonPath('status', 'paid');
-
-        // بار دوم: وب‌هوک تکراری باید رد شود
-        $this->postJson('/api/webhooks/payment', $payload)
-            ->assertStatus(409);
-
-        // وضعیت سفارش باید همچنان paid باشد
-        $this->assertDatabaseHas('orders', [
-            'payment_token' => $token,
-            'status' => 'paid',
-        ]);
-
-        // موجودی نباید دوباره تغییر کند
-        $this->assertDatabaseHas('products', [
-            'id' => $product->id,
-            'stock' => 4,
-        ]);
-    }
-
-    public function test_checkout_rejects_nonexistent_product(): void
-    {
-        $response = $this->postJson('/api/checkout', [
-            'items' => [
-                [
-                    'product_id' => 999999,
-                    'quantity' => 1,
-                ],
-            ],
-        ]);
-
-        $response->assertStatus(422);
+        ])->assertStatus(422);
 
         $this->assertDatabaseCount('orders', 0);
     }
 
     public function test_checkout_rejects_invalid_quantity(): void
     {
-        $category = Category::create([
-            'name' => 'Test Category',
-        ]);
+        $product = $this->createProduct();
 
-        $product = Product::create([
-            'category_id' => $category->id,
-            'name' => 'Test Product',
-            'price' => 100.00,
-            'stock' => 5,
-        ]);
-
-        $response = $this->postJson('/api/checkout', [
-            'items' => [
-                [
-                    'product_id' => $product->id,
-                    'quantity' => 0,
-                ],
-            ],
-        ]);
-
-        $response->assertStatus(422);
+        $this->checkout($product, 0)
+            ->assertStatus(422);
 
         $this->assertDatabaseCount('orders', 0);
+    }
+
+    public function test_checkout_rejects_nonexistent_product(): void
+    {
+        Sanctum::actingAs(User::factory()->create());
+        $this->postJson('/api/checkout', [
+            'items' => [
+                [
+                    'product_id' => 999999,
+                    'quantity' => 1,
+                ],
+            ],
+        ])->assertStatus(422);
+
+        $this->assertDatabaseCount('orders', 0);
+    }
+
+    public function test_successful_payment_marks_order_as_paid(): void
+    {
+        $product = $this->createProduct();
+
+        $this->checkout($product)->assertCreated();
+
+        $this->getCallback()
+            ->assertOk()
+            ->assertJsonPath('status', 'paid')
+            ->assertJsonPath('ref_id', '123456789');
+        $order = Order::firstOrFail();
+
+        $this->assertSame('paid', $order->status);
+        $this->assertSame('123456789', $order->payment_reference);
+        $this->assertNotNull($order->paid_at);
 
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
-            'stock' => 5,
+            'stock' => 4,
+        ]);
+
+        Http::assertSent(function (Request $request) {
+            return str_ends_with($request->url(), '/verify.json')
+                && $request['authority'] === self::AUTHORITY
+                && $request['amount'] === 1000;
+        });
+    }
+
+    public function test_successful_callback_cannot_process_payment_twice(): void
+    {
+        $product = $this->createProduct();
+
+        $this->checkout($product)->assertCreated();
+
+        $this->getCallback()->assertOk();
+
+        // Callback تکراری باید بدون Verify مجدد پاسخ موفق بدهد.
+        $this->getCallback()
+            ->assertOk()
+            ->assertJsonPath('status', 'paid');
+
+        $this->assertDatabaseHas('products', [
+            'id' => $product->id,
+            'stock' => 4,
+        ]);
+
+        $this->assertDatabaseHas('orders', [
+            'payment_token' => self::AUTHORITY,
+            'status' => 'paid',
+            'payment_reference' => '123456789',
         ]);
     }
 
-    public function test_checkout_rolls_back_stock_when_a_later_item_has_insufficient_stock(): void
+    public function test_nok_callback_keeps_order_pending_and_stock_reserved(): void
     {
-        $category = Category::create([
-            'name' => 'Test Category',
+        $product = $this->createProduct('100.00', 5);
+
+        $this->checkout($product, 2)->assertCreated();
+
+        $this->getCallback('NOK')
+            ->assertStatus(202)
+            ->assertJsonPath('status', 'pending');
+
+        $this->assertDatabaseHas('products', [
+            'id' => $product->id,
+            'stock' => 3,
         ]);
 
-        $firstProduct = Product::create([
-            'category_id' => $category->id,
-            'name' => 'First Product',
-            'price' => 100.00,
-            'stock' => 5,
+        $this->assertDatabaseHas('orders', [
+            'payment_token' => self::AUTHORITY,
+            'status' => 'pending',
+        ]);
+    }
+
+    public function test_repeated_nok_callbacks_keep_order_pending_and_stock_reserved(): void
+    {
+        $product = $this->createProduct('100.00', 5);
+
+        $this->checkout($product, 2)->assertCreated();
+
+        $this->getCallback('NOK')
+            ->assertStatus(202);
+
+        $this->getCallback('NOK')
+            ->assertStatus(202)
+            ->assertJsonPath('status', 'pending');
+
+        $this->assertDatabaseHas('products', [
+            'id' => $product->id,
+            'stock' => 3,
         ]);
 
-        $secondProduct = Product::create([
-            'category_id' => $category->id,
-            'name' => 'Second Product',
-            'price' => 100.00,
-            'stock' => 1,
+        $this->assertDatabaseHas('orders', [
+            'payment_token' => self::AUTHORITY,
+            'status' => 'pending',
         ]);
+    }
+
+    public function test_callback_rejects_missing_authority(): void
+    {
+        $this->getJson('/api/payment/callback?Status=OK')
+            ->assertStatus(400);
+    }
+
+    public function test_callback_rejects_unknown_authority(): void
+    {
+        $this->getJson(
+            '/api/payment/callback?Authority=UNKNOWN&Status=OK'
+        )->assertNotFound();
+    }
+
+    public function test_callback_rejects_invalid_status(): void
+    {
+        $product = $this->createProduct();
+
+        $this->checkout($product)->assertCreated();
+
+        $this->getCallback('UNKNOWN')
+            ->assertStatus(400);
+
+        $this->assertDatabaseHas('orders', [
+            'payment_token' => self::AUTHORITY,
+            'status' => 'pending',
+        ]);
+    }
+
+    public function test_checkout_keeps_order_pending_on_connection_failure(): void
+    {
+        Http::fake([
+            '*' => function () {
+                throw new ConnectionException(
+                    'Simulated connection failure'
+                );
+            },
+        ]);
+
+        $product = $this->createProduct('100.00', 5);
+
+        $response = $this->checkout($product);
+
+        $response->assertStatus(503)
+            ->assertJsonPath('status', 'pending');
+
+        $this->assertDatabaseHas('orders', [
+            'status' => 'pending',
+            'payment_token' => null,
+        ]);
+
+        $this->assertDatabaseHas('products', [
+            'id' => $product->id,
+            'stock' => 4,
+        ]);
+    }
+
+    public function test_verify_connection_failure_keeps_order_pending(): void
+    {
+        Http::fake([
+            '*request.json' => Http::response([
+                'data' => [
+                    'code' => 100,
+                    'authority' => self::AUTHORITY,
+                ],
+                'errors' => [],
+            ], 200),
+
+            '*verify.json' => function () {
+                throw new ConnectionException(
+                    'Simulated verification failure'
+                );
+            },
+        ]);
+
+        $product = $this->createProduct();
+
+        $this->checkout($product)->assertCreated();
+
+        $this->getCallback()
+            ->assertStatus(503)
+            ->assertJsonPath('status', 'pending');
+
+        $this->assertDatabaseHas('orders', [
+            'payment_token' => self::AUTHORITY,
+            'status' => 'pending',
+            'payment_reference' => null,
+            'verification_started_at' => null,
+            'verification_token' => null,
+        ]);
+
+        $this->assertDatabaseHas('products', [
+            'id' => $product->id,
+            'stock' => 4,
+        ]);
+    }
+
+    public function test_payment_remains_pending_when_verification_has_no_reference_id(): void
+    {
+        $product = $this->createProduct('100.00', 5);
+
+        $this->checkout($product)->assertCreated();
+
+        Http::swap(new \Illuminate\Http\Client\Factory);
+
+        Http::fake([
+            '*verify.json' => Http::response([
+                'data' => [
+                    'code' => 100,
+                ],
+                'errors' => [],
+            ], 200),
+        ]);
+
+        $this->getCallback()
+            ->assertStatus(503)
+            ->assertJsonPath('status', 'pending');
+
+        $this->assertDatabaseHas('orders', [
+            'payment_token' => self::AUTHORITY,
+            'status' => 'pending',
+            'payment_reference' => null,
+        ]);
+
+        $this->assertDatabaseHas('products', [
+            'id' => $product->id,
+            'stock' => 4,
+        ]);
+    }
+    public function test_payment_remains_pending_on_unexpected_verification_error(): void
+    {
+        $product = $this->createProduct('100.00', 5);
+
+        $this->checkout($product)->assertCreated();
+
+        Http::swap(new \Illuminate\Http\Client\Factory);
+
+        Http::fake([
+            '*verify.json' => function () {
+                throw new \Error('Simulated unexpected verification error');
+            },
+        ]);
+
+        $this->getCallback()
+            ->assertStatus(503)
+            ->assertJsonPath('status', 'pending');
+
+        $this->assertDatabaseHas('orders', [
+            'payment_token' => self::AUTHORITY,
+            'status' => 'pending',
+            'payment_reference' => null,
+        ]);
+
+        $this->assertDatabaseHas('products', [
+            'id' => $product->id,
+            'stock' => 4,
+        ]);
+    }
+    public function test_checkout_rolls_back_all_stock_when_a_later_item_has_insufficient_stock(): void
+    {
+        Sanctum::actingAs(User::factory()->create());
+        $firstProduct = $this->createProduct('100.00', 5);
+        $secondProduct = $this->createProduct('200.00', 1);
 
         $response = $this->postJson('/api/checkout', [
             'items' => [
@@ -494,29 +504,34 @@ class CheckoutTest extends TestCase
         ]);
     }
 
-    public function test_checkout_calculates_decimal_prices_correctly(): void
+    public function test_checkout_keeps_order_pending_and_stock_reserved_when_zarinpal_request_result_is_unconfirmed(): void
     {
-        $category = Category::create([
-            'name' => 'Decimal Price Category',
-        ]);
+        Http::swap(new \Illuminate\Http\Client\Factory);
 
-        $product = Product::create([
-            'category_id' => $category->id,
-            'name' => 'Decimal Price Product',
-            'price' => '19.99',
-            'stock' => 10,
-        ]);
-
-        $response = $this->postJson('/api/checkout', [
-            'items' => [
-                [
-                    'product_id' => $product->id,
-                    'quantity' => 3,
+        Http::fake([
+            '*' => Http::response([
+                'data' => [
+                    'code' => -9,
+                    'message' => 'Payment request rejected',
                 ],
-            ],
+                'errors' => [],
+            ], 200),
         ]);
 
-        $response->assertCreated()
-            ->assertJsonPath('order.total_amount', '59.97');
+        $product = $this->createProduct('100.00', 5);
+
+        $response = $this->checkout($product, 2);
+
+        $response->assertStatus(503);
+
+        $this->assertDatabaseHas('orders', [
+            'status' => 'pending',
+            'total_amount' => 200,
+        ]);
+
+        $this->assertDatabaseHas('products', [
+            'id' => $product->id,
+            'stock' => 3,
+        ]);
     }
 }

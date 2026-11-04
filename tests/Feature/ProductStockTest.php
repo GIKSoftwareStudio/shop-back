@@ -4,7 +4,9 @@ namespace Tests\Feature;
 
 use App\Models\Category;
 use App\Models\Product;
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Laravel\Sanctum\Sanctum;
 use Illuminate\Foundation\Testing\WithFaker;
 use Tests\TestCase;
 
@@ -33,6 +35,12 @@ class ProductStockTest extends TestCase
 
     public function test_admin_can_create_product_with_stock(): void
     {
+        $admin = User::factory()->create([
+            'is_admin' => true,
+        ]);
+
+        Sanctum::actingAs($admin);
+
         $category = Category::create([
             'name' => 'Test Category',
         ]);
@@ -54,6 +62,12 @@ class ProductStockTest extends TestCase
 
     public function test_admin_can_update_product_stock(): void
     {
+        $admin = User::factory()->create([
+            'is_admin' => true,
+        ]);
+
+        Sanctum::actingAs($admin);
+
         $category = Category::create([
             'name' => 'Test Category',
         ]);

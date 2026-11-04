@@ -2,21 +2,36 @@
 
 namespace App\Http\Controllers\Api;
 
+use AbolfazlAhmadi\LaravelZarinpal\Services\ZarinpalService;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\CheckoutRequest;
 use App\Models\Order;
 use App\Models\Product;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Validation\ValidationException;
+use RuntimeException;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 class CheckoutController extends Controller
 {
-    public function store(CheckoutRequest $request)
-    {
+    public function store(
+        CheckoutRequest $request,
+        ZarinpalService $zarinpal
+    ) {
         $items = $request->validated()['items'];
 
-        $order = DB::transaction(function () use ($items) {
+        $maxAmount = (int) config('zarinpal.max_amount');
+
+        if ($maxAmount <= 0) {
+            return response()->json([
+                'message' => 'تنظیم سقف مبلغ پرداخت معتبر نیست.',
+            ], 500);
+        }
+
+        $order = DB::transaction(function () use ($items, $maxAmount) {
             $totalCents = 0;
             $orderItems = [];
 
@@ -40,7 +55,9 @@ class CheckoutController extends Controller
                 }
 
                 $priceParts = explode('.', (string) $product->price);
+
                 $whole = (int) $priceParts[0];
+
                 $fraction = (int) str_pad(
                     substr($priceParts[1] ?? '0', 0, 2),
                     2,
@@ -48,6 +65,13 @@ class CheckoutController extends Controller
                 );
 
                 $unitPriceCents = ($whole * 100) + $fraction;
+
+                if ($unitPriceCents % 100 !== 0 || $unitPriceCents <= 0) {
+                    throw ValidationException::withMessages([
+                        'items' => "قیمت محصول {$product->name} باید عدد صحیح و مثبت تومان باشد.",
+                    ]);
+                }
+
                 $totalCents += $unitPriceCents * $quantity;
 
                 $orderItems[] = [
@@ -59,13 +83,24 @@ class CheckoutController extends Controller
                 $product->decrement('stock', $quantity);
             }
 
-            $totalAmount = intdiv($totalCents, 100)
-                . '.'
-                . str_pad((string) ($totalCents % 100), 2, '0', STR_PAD_LEFT);
+            // زرین‌پال مبلغ صحیح تومان دریافت می‌کند.
+            if ($totalCents <= 0 || $totalCents % 100 !== 0) {
+                throw ValidationException::withMessages([
+                    'items' => 'مبلغ سفارش باید عدد صحیح و مثبت تومان باشد.',
+                ]);
+            }
+
+            $amountInToman = intdiv($totalCents, 100);
+
+            if ($amountInToman > $maxAmount) {
+                throw ValidationException::withMessages([
+                    'items' => 'مبلغ سفارش از سقف مجاز پرداخت بیشتر است.',
+                ]);
+            }
 
             $order = Order::create([
                 'user_id' => auth()->id(),
-                'total_amount' => $totalAmount,
+                'total_amount' => $amountInToman,
                 'status' => 'pending',
                 'payment_token' => null,
             ]);
@@ -75,50 +110,100 @@ class CheckoutController extends Controller
             return $order;
         });
 
-        // درخواست به زرین‌پال (مستقیم با Http)
-        $merchantId = config('zarinpal.merchant_id');
         $callbackUrl = url('/api/payment/callback');
-        $amountInRial = (int) round(((float) $order->total_amount) * 10); // تومان → ریال
 
-        $response = Http::withHeaders([
-            'Content-Type' => 'application/json',
-            'Accept' => 'application/json',
-        ])->post('https://sandbox.zarinpal.com/pg/v4/payment/request.json', [
-            'merchant_id' => $merchantId,
-            'amount' => $amountInRial,
-            'description' => 'پرداخت سفارش #' . $order->id,
-            'callback_url' => $callbackUrl,
-        ]);
-
-        $zarinpalResult = $response->json();
-
-        if (
-            $response->failed() ||
-            empty($zarinpalResult['data']['authority'])
-        ) {
-            DB::transaction(function () use ($order) {
-                foreach ($order->items as $item) {
-                    $product = Product::withTrashed()
-                        ->whereKey($item->product_id)
-                        ->lockForUpdate()
-                        ->first();
-
-                    if ($product) {
-                        $product->increment('stock', $item->quantity);
-                    }
-                }
-
-                $order->update(['status' => 'failed']);
-            });
+        try {
+            $payment = $zarinpal->request(
+                (int) $order->total_amount,
+                'پرداخت سفارش #' . $order->id,
+                $callbackUrl
+            );
+        } catch (RuntimeException $exception) {
+            Log::warning('Zarinpal payment request result is unconfirmed.', [
+                'order_id' => $order->id,
+                'exception' => $exception->getMessage(),
+            ]);
 
             return response()->json([
-                'message' => 'خطا در اتصال به درگاه پرداخت. لطفاً دوباره تلاش کنید.',
-                'error' => $zarinpalResult['errors'] ?? 'unknown',
-            ], 502);
+                'message' => 'نتیجه درخواست پرداخت از درگاه قطعی نیست؛ سفارش در انتظار بررسی باقی مانده است.',
+                'order_id' => $order->id,
+                'status' => 'pending',
+            ], 503);
+        } catch (ConnectionException|RequestException $exception) {
+            Log::warning('Zarinpal payment request has an uncertain result.', [
+                'order_id' => $order->id,
+                'exception_class' => get_class($exception),
+                'exception' => $exception->getMessage(),
+            ]);
+
+            return response()->json([
+                'message' => 'ارتباط با درگاه پرداخت قطع شد. وضعیت سفارش نیازمند بررسی است.',
+                'order_id' => $order->id,
+                'status' => 'pending',
+            ], 503);
+        } catch (Throwable $exception) {
+            Log::error('Unexpected error during Zarinpal payment request.', [
+                'order_id' => $order->id,
+                'exception_class' => get_class($exception),
+                'exception' => $exception->getMessage(),
+            ]);
+
+            return response()->json([
+                'message' => 'خطای پیش‌بینی‌نشده هنگام ارتباط با درگاه رخ داد. وضعیت سفارش نیازمند بررسی است.',
+                'order_id' => $order->id,
+                'status' => 'pending',
+            ], 503);
         }
 
-        $authority = $zarinpalResult['data']['authority'];
-        $order->update(['payment_token' => $authority]);
+        $authority = $payment['authority'] ?? null;
+        $paymentUrl = $payment['url'] ?? null;
+
+        $expectedHost = config('zarinpal.sandbox')
+            ? 'sandbox.zarinpal.com'
+            : 'payment.zarinpal.com';
+
+        $urlParts = is_string($paymentUrl) ? parse_url($paymentUrl) : false;
+
+        $validPaymentResponse =
+            is_string($authority)
+            && $authority !== ''
+            && is_array($urlParts)
+            && ($urlParts['scheme'] ?? null) === 'https'
+            && ($urlParts['host'] ?? null) === $expectedHost
+            && str_starts_with($urlParts['path'] ?? '', '/pg/StartPay/')
+            && basename($urlParts['path'] ?? '') === $authority;
+
+        if (! $validPaymentResponse) {
+            Log::error('Zarinpal returned an invalid payment response.', [
+                'order_id' => $order->id,
+                'has_authority' => is_string($authority) && $authority !== '',
+                'has_valid_url' => is_array($urlParts),
+            ]);
+
+            return response()->json([
+                'message' => 'پاسخ درگاه پرداخت معتبر نیست. وضعیت سفارش نیازمند بررسی است.',
+                'order_id' => $order->id,
+                'status' => 'pending',
+            ], 503);
+        }
+
+        try {
+            $order->update([
+                'payment_token' => $authority,
+            ]);
+        } catch (Throwable $exception) {
+            Log::critical('Could not save Zarinpal authority for order.', [
+                'order_id' => $order->id,
+                'exception_class' => get_class($exception),
+                'exception' => $exception->getMessage(),
+            ]);
+
+            return response()->json([
+                'message' => 'درخواست پرداخت ایجاد شده اما ثبت اطلاعات آن با مشکل مواجه شد. سفارش نیازمند بررسی است.',
+                'order_id' => $order->id,
+                'status' => 'pending',
+            ], 503);
+        }
 
         return response()->json([
             'message' => 'سفارش با موفقیت ثبت شد.',
@@ -127,7 +212,7 @@ class CheckoutController extends Controller
                 'total_amount' => $order->total_amount,
                 'status' => $order->status,
             ],
-            'payment_url' => 'https://sandbox.zarinpal.com/pg/StartPay/' . $authority,
+            'payment_url' => $paymentUrl,
         ], 201);
     }
 }
