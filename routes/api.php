@@ -40,8 +40,7 @@ Route::get('/products', [ProductController::class, 'index']);
 Route::get('/products/{product}', [ProductController::class, 'show']);
 
 // ثبت سفارش
-Route::post('/checkout', [CheckoutController::class, 'store'])
-    ->middleware('auth:sanctum');
+Route::post('/checkout', [CheckoutController::class, 'store'])->middleware('throttle:5,1');
 
 // بخش مدیریت
 Route::prefix('admin')

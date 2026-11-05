@@ -86,25 +86,36 @@ class CheckoutTest extends TestCase
         );
     }
 
-    public function test_guest_cannot_checkout(): void
+    public function test_guest_can_checkout_without_user_information(): void
     {
         $product = $this->createProduct('100.00', 5);
 
-        $this->postJson('/api/checkout', [
+        $response = $this->postJson('/api/checkout', [
             'items' => [
                 [
                     'product_id' => $product->id,
                     'quantity' => 1,
                 ],
             ],
-        ])->assertUnauthorized();
+        ]);
 
-        $this->assertDatabaseCount('orders', 0);
+        $response->assertCreated()
+            ->assertJsonPath('order.total_amount', '100.00')
+            ->assertJsonPath('order.status', 'pending');
+
+        $this->assertDatabaseHas('orders', [
+            'user_id' => null,
+            'total_amount' => 100,
+            'status' => 'pending',
+            'payment_token' => self::AUTHORITY,
+        ]);
 
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
-            'stock' => 5,
+            'stock' => 4,
         ]);
+
+        $this->assertDatabaseCount('order_items', 1);
     }
 
     public function test_checkout_creates_order_and_reduces_stock(): void
