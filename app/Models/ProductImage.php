@@ -2,15 +2,26 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory; // <--- ۱. این خط باید بالای فایل باشد
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;  // اینم خودت نوشتی
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-
-class ProductImage extends Model  // متن داخل این کلاس هم خودت نوشتی خالی بود قبلش
+class ProductImage extends Model
 {
-    use HasFactory; // <--- این خط حتماً باید در هر ۳ مدل باشد
-    protected $fillable = ['product_id', 'image_url', 'is_primary'];
+    use HasFactory;
+
+    protected $fillable = [
+        'product_id',
+        'image_url',
+        'is_primary',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'is_primary' => 'boolean',
+        ];
+    }
 
     public function product(): BelongsTo
     {

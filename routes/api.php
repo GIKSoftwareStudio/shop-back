@@ -51,6 +51,14 @@ Route::prefix('admin')
         Route::apiResource('categories', AdminCategoryController::class);
         Route::apiResource('products', AdminProductController::class);
 
+        Route::post('/products/{product}/images', [\App\Http\Controllers\Api\Admin\ProductImageController::class, 'store']);
+
+        Route::put('/products/{product}/images/{image}', [\App\Http\Controllers\Api\Admin\ProductImageController::class, 'update']);
+
+        Route::patch('/products/{product}/images/{image}/primary', [\App\Http\Controllers\Api\Admin\ProductImageController::class, 'setPrimary']);
+
+        Route::delete('/products/{product}/images/{image}', [\App\Http\Controllers\Api\Admin\ProductImageController::class, 'destroy']);
+
         Route::get('/orders', [OrderController::class, 'index']);
     });
 
