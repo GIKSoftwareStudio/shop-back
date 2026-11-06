@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\CheckoutController;
 use App\Http\Controllers\Api\PaymentController;
 use App\Http\Controllers\Api\Public\CategoryController;
 use App\Http\Controllers\Api\Public\ProductController;
+use App\Http\Controllers\Api\Public\CartController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
@@ -38,6 +39,7 @@ Route::get('/categories/{category}', [CategoryController::class, 'show']);
 // محصولات
 Route::get('/products', [ProductController::class, 'index']);
 Route::get('/products/{product}', [ProductController::class, 'show']);
+Route::post('/cart/prices', [CartController::class, 'prices']);
 
 // ثبت سفارش
 Route::post('/checkout', [CheckoutController::class, 'store'])->middleware('throttle:5,1');
