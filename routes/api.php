@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\Admin\CategoryController as AdminCategoryController;
 use App\Http\Controllers\Api\Admin\ProductController as AdminProductController;
+use App\Http\Controllers\Api\Assistant\ProductController as AssistantProductController;
 use App\Http\Controllers\Api\Admin\OrderController;
 use App\Http\Controllers\Api\Auth\AuthController;
 use App\Http\Controllers\Api\CheckoutController;
@@ -60,6 +61,13 @@ Route::prefix('admin')
         Route::delete('/products/{product}/images/{image}', [\App\Http\Controllers\Api\Admin\ProductImageController::class, 'destroy']);
 
         Route::get('/orders', [OrderController::class, 'index']);
+    });
+
+// دستیار فروشگاه
+Route::prefix('assistant')
+    ->middleware('assistant.token')
+    ->group(function () {
+        Route::get('/products', [AssistantProductController::class, 'index']);
     });
 
 // بازگشت از درگاه پرداخت زرین‌پال

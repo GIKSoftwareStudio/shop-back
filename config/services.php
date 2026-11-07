@@ -38,4 +38,8 @@ return [
     'payment' => [
         'webhook_secret' => env('PAYMENT_WEBHOOK_SECRET'),
     ],
+
+    'assistant' => [
+        'token' => env('ASSISTANT_API_TOKEN'),
+    ],
 ];
