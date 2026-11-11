@@ -142,4 +142,104 @@ class ProductFilterTest extends TestCase
             ->assertJsonPath('meta.per_page', 5)
             ->assertJsonPath('meta.total', 12);
     }
+
+    public function test_products_api_can_filter_in_stock_products(): void
+    {
+        $category = Category::create(['name' => 'Mobile']);
+
+        $available = Product::create([
+            'category_id' => $category->id,
+            'name' => 'Available Product',
+            'price' => 1000,
+            'stock' => 5,
+        ]);
+
+        Product::create([
+            'category_id' => $category->id,
+            'name' => 'Unavailable Product',
+            'price' => 2000,
+            'stock' => 0,
+        ]);
+
+        $this->getJson('/api/products?in_stock=true')
+            ->assertOk()
+            ->assertJsonCount(1, 'products')
+            ->assertJsonPath('products.0.id', $available->id);
+    }
+
+    public function test_products_api_can_filter_out_of_stock_products(): void
+    {
+        $category = Category::create(['name' => 'Mobile']);
+
+        Product::create([
+            'category_id' => $category->id,
+            'name' => 'Available Product',
+            'price' => 1000,
+            'stock' => 5,
+        ]);
+
+        $unavailable = Product::create([
+            'category_id' => $category->id,
+            'name' => 'Unavailable Product',
+            'price' => 2000,
+            'stock' => 0,
+        ]);
+
+        $this->getJson('/api/products?in_stock=false')
+            ->assertOk()
+            ->assertJsonCount(1, 'products')
+            ->assertJsonPath('products.0.id', $unavailable->id);
+    }
+
+    public function test_products_api_can_sort_newest_first(): void
+    {
+        $category = Category::create(['name' => 'Mobile']);
+
+        $oldest = Product::create([
+            'category_id' => $category->id,
+            'name' => 'Old Product',
+            'price' => 1000,
+            'stock' => 5,
+            'created_at' => '2026-01-01 10:00:00',
+        ]);
+
+        $newest = Product::create([
+            'category_id' => $category->id,
+            'name' => 'New Product',
+            'price' => 2000,
+            'stock' => 5,
+            'created_at' => '2026-02-01 10:00:00',
+        ]);
+
+        $this->getJson('/api/products?sort_by=newest')
+            ->assertOk()
+            ->assertJsonPath('products.0.id', $newest->id)
+            ->assertJsonPath('products.1.id', $oldest->id);
+    }
+
+    public function test_products_api_can_sort_oldest_first(): void
+    {
+        $category = Category::create(['name' => 'Mobile']);
+
+        $oldest = Product::create([
+            'category_id' => $category->id,
+            'name' => 'Old Product',
+            'price' => 1000,
+            'stock' => 5,
+            'created_at' => '2026-01-01 10:00:00',
+        ]);
+
+        $newest = Product::create([
+            'category_id' => $category->id,
+            'name' => 'New Product',
+            'price' => 2000,
+            'stock' => 5,
+            'created_at' => '2026-02-01 10:00:00',
+        ]);
+
+        $this->getJson('/api/products?sort_by=oldest')
+            ->assertOk()
+            ->assertJsonPath('products.0.id', $oldest->id)
+            ->assertJsonPath('products.1.id', $newest->id);
+    }
 }
