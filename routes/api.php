@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\Assistant\ProductController as AssistantProductCont
 use App\Http\Controllers\Api\Admin\OrderController;
 use App\Http\Controllers\Api\CheckoutController;
 use App\Http\Controllers\Api\PaymentController;
+use App\Http\Controllers\Api\OrderStatusController;
 use App\Http\Controllers\Api\Public\CategoryController;
 use App\Http\Controllers\Api\Public\ProductController;
 use App\Http\Controllers\Api\Public\CartController;
@@ -29,7 +30,13 @@ Route::get('/products/{product}', [ProductController::class, 'show']);
 Route::post('/cart/prices', [CartController::class, 'prices']);
 
 // ثبت سفارش
-Route::post('/checkout', [CheckoutController::class, 'store'])->middleware('throttle:5,1');
+// ثبت سفارش فقط برای کاربران واردشده
+Route::post('/checkout', [CheckoutController::class, 'store'])
+    ->middleware(['auth:sanctum', 'throttle:5,1']);
+
+// دریافت وضعیت پرداخت سفارش توسط صاحب سفارش
+Route::get('/orders/{order}/status', [OrderStatusController::class, 'show'])
+    ->middleware('auth:sanctum');
 
 // بخش مدیریت
 Route::prefix('admin')
