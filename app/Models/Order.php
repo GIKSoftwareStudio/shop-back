@@ -15,6 +15,7 @@ class Order extends Model
         'user_id',
         'total_amount',
         'status',
+        'stock_status',
         'payment_token',
         'payment_reference',
         'paid_at',

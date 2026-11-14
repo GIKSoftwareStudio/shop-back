@@ -110,15 +110,17 @@ class CheckoutTest extends TestCase
             'payment_token' => self::AUTHORITY,
         ]);
 
+        // بررسی می‌کند موجودی واقعی ثابت مانده و یک عدد از موجودی رزرو شده است.
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
-            'stock' => 4,
+            'stock' => 5,
+            'reserved_stock' => 1,
         ]);
 
         $this->assertDatabaseCount('order_items', 1);
     }
 
-    public function test_checkout_creates_order_and_reduces_stock(): void
+    public function test_checkout_creates_order_and_reserves_stock(): void
     {
         $product = $this->createProduct('100.00', 5);
 
@@ -134,9 +136,11 @@ class CheckoutTest extends TestCase
             'payment_token' => self::AUTHORITY,
         ]);
 
+        // بررسی می‌کند که موجودی واقعی حفظ شده و تعداد سفارش رزرو شده است.
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
-            'stock' => 3,
+            'stock' => 5,
+            'reserved_stock' => 2,
         ]);
 
         $this->assertDatabaseCount('order_items', 1);
@@ -241,9 +245,11 @@ class CheckoutTest extends TestCase
         $this->assertSame('123456789', $order->payment_reference);
         $this->assertNotNull($order->paid_at);
 
+        // بررسی می‌کند که پس از پرداخت موفق، موجودی واقعی کم و رزرو آزاد شده باشد.
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
             'stock' => 4,
+            'reserved_stock' => 0,
         ]);
 
         Http::assertSent(function (Request $request) {
@@ -266,9 +272,11 @@ class CheckoutTest extends TestCase
             ->assertOk()
             ->assertJsonPath('status', 'paid');
 
+        // بررسی می‌کند که Callback تکراری موجودی رزروشده را دوباره تغییر ندهد.
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
             'stock' => 4,
+            'reserved_stock' => 0,
         ]);
 
         $this->assertDatabaseHas('orders', [
@@ -288,9 +296,11 @@ class CheckoutTest extends TestCase
             ->assertStatus(202)
             ->assertJsonPath('status', 'pending');
 
+        // بررسی می‌کند که با Callback ناموفق، موجودی واقعی تغییر نکند و رزرو حفظ شود.
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
-            'stock' => 3,
+            'stock' => 5,
+            'reserved_stock' => 2,
         ]);
 
         $this->assertDatabaseHas('orders', [
@@ -312,9 +322,11 @@ class CheckoutTest extends TestCase
             ->assertStatus(202)
             ->assertJsonPath('status', 'pending');
 
+        // بررسی می‌کند که Callback ناموفق تکراری باعث تغییر موجودی یا رزرو نشود.
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
-            'stock' => 3,
+            'stock' => 5,
+            'reserved_stock' => 2,
         ]);
 
         $this->assertDatabaseHas('orders', [
@@ -373,9 +385,11 @@ class CheckoutTest extends TestCase
             'payment_token' => null,
         ]);
 
+        // بررسی می‌کند که با قطع ارتباط، رزرو حفظ شود و موجودی واقعی تغییر نکند.
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
-            'stock' => 4,
+            'stock' => 5,
+            'reserved_stock' => 1,
         ]);
     }
 
@@ -413,9 +427,11 @@ class CheckoutTest extends TestCase
             'verification_token' => null,
         ]);
 
+        // بررسی می‌کند که هنگام خطای Verify، رزرو حفظ و موجودی واقعی دست‌نخورده بماند.
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
-            'stock' => 4,
+            'stock' => 5,
+            'reserved_stock' => 1,
         ]);
     }
 
@@ -446,9 +462,11 @@ class CheckoutTest extends TestCase
             'payment_reference' => null,
         ]);
 
+        // بررسی می‌کند که بدون دریافت شناسه پرداخت، رزرو حفظ شود.
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
-            'stock' => 4,
+            'stock' => 5,
+            'reserved_stock' => 1,
         ]);
     }
     public function test_payment_remains_pending_on_unexpected_verification_error(): void
@@ -475,9 +493,11 @@ class CheckoutTest extends TestCase
             'payment_reference' => null,
         ]);
 
+        // بررسی می‌کند که هنگام خطای غیرمنتظره، رزرو حفظ شود.
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
-            'stock' => 4,
+            'stock' => 5,
+            'reserved_stock' => 1,
         ]);
     }
     public function test_checkout_rolls_back_all_stock_when_a_later_item_has_insufficient_stock(): void
@@ -504,14 +524,18 @@ class CheckoutTest extends TestCase
         $this->assertDatabaseCount('orders', 0);
         $this->assertDatabaseCount('order_items', 0);
 
+        // بررسی می‌کند که رزرو محصول اول پس از Rollback به حالت اولیه برگردد.
         $this->assertDatabaseHas('products', [
             'id' => $firstProduct->id,
             'stock' => 5,
+            'reserved_stock' => 0,
         ]);
 
+        // بررسی می‌کند که موجودی و رزرو محصول دوم نیز بدون تغییر باقی بماند.
         $this->assertDatabaseHas('products', [
             'id' => $secondProduct->id,
             'stock' => 1,
+            'reserved_stock' => 0,
         ]);
     }
 
@@ -540,9 +564,11 @@ class CheckoutTest extends TestCase
             'total_amount' => 200,
         ]);
 
+        // بررسی می‌کند که با نامشخص بودن نتیجه درخواست، رزرو موجودی حفظ شود.
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
-            'stock' => 3,
+            'stock' => 5,
+            'reserved_stock' => 2,
         ]);
     }
 }

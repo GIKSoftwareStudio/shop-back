@@ -5,11 +5,10 @@ namespace App\Http\Controllers\Api;
 use AbolfazlAhmadi\LaravelZarinpal\Services\ZarinpalService;
 use App\Http\Controllers\Controller;
 use App\Models\Order;
-use App\Models\Product;
+use App\Services\PaymentFinalizationService;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use RuntimeException;
 use Illuminate\Support\Facades\Log;
 use Throwable;
@@ -19,7 +18,8 @@ class PaymentController extends Controller
 {
     public function callback(
         Request $request,
-        ZarinpalService $zarinpal
+        ZarinpalService $zarinpal,
+        PaymentFinalizationService $finalizationService
     ) {
         $authority = $request->query('Authority');
         $status = $request->query('Status');
@@ -160,82 +160,37 @@ class PaymentController extends Controller
             ], 503);
         }
 
-        $result = DB::transaction(function () use ($order, $refId, $verificationToken) {
-            $updated = Order::whereKey($order->id)
-                ->where('status', 'pending')
-                ->where('verification_token', $verificationToken)
-                ->update([
-                    'status' => 'paid',
-                    'payment_reference' => (string) $refId,
-                    'paid_at' => now(),
-                    'verification_started_at' => null,
-                    'verification_token' => null,
-                ]);
 
-            $updatedOrder = Order::find($order->id);
 
-            if ($updated === 1) {
-                return [
-                    'success' => true,
-                    'order' => $updatedOrder,
-                ];
-            }
+        try {
+            $finalizedOrder = $finalizationService->confirmPayment(
+                $order,
+                $refId,
+                $verificationToken
+            );
+        } catch (Throwable $exception) {
+            Log::error('Payment finalization failed.', [
+                'order_id' => $order->id,
+                'exception_class' => get_class($exception),
+                'exception' => $exception->getMessage(),
+            ]);
 
-            if ($updatedOrder && $updatedOrder->status === 'paid') {
-                return [
-                    'already_paid' => true,
-                    'order' => $updatedOrder,
-                ];
-            }
+            $this->releaseVerificationLock($order, $verificationToken);
 
-            return [
-                'conflict' => true,
-                'order' => $updatedOrder,
-            ];
-        });
-
-        if (isset($result['conflict'])) {
             return response()->json([
-                'message' => 'وضعیت سفارش در زمان تأیید پرداخت تغییر کرده است.',
-                'status' => $result['order']?->status ?? 'not_found',
-            ], 409);
+                'message' => 'تأیید پرداخت انجام شد، اما نهایی‌سازی سفارش نیازمند بررسی مجدد است.',
+                'order_id' => $order->id,
+                'status' => 'pending',
+            ], 503);
         }
 
         return response()->json([
             'message' => 'پرداخت با موفقیت تأیید شد.',
-            'order_id' => $result['order']->id,
-            'ref_id' => $result['order']->payment_reference,
-            'paid_at' => $result['order']->paid_at,
+            'order_id' => $finalizedOrder->id,
+            'ref_id' => $finalizedOrder->payment_reference,
+            'paid_at' => $finalizedOrder->paid_at,
             'status' => 'paid',
         ]);
-    }
-
-    private function restoreStockAndFail(Order $order): void
-    {
-        DB::transaction(function () use ($order) {
-            $lockedOrder = Order::whereKey($order->id)
-                ->lockForUpdate()
-                ->first();
-
-            if (! $lockedOrder || $lockedOrder->status !== 'pending') {
-                return;
-            }
-
-            foreach ($lockedOrder->items as $item) {
-                $product = Product::withTrashed()
-                    ->whereKey($item->product_id)
-                    ->lockForUpdate()
-                    ->first();
-
-                if ($product) {
-                    $product->increment('stock', $item->quantity);
-                }
-            }
-
-            $lockedOrder->update([
-                'status' => 'failed',
-            ]);
-        });
     }
 
     private function releaseVerificationLock(

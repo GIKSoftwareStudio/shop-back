@@ -15,6 +15,7 @@ class ProductResource extends JsonResource
             'title' => $this->name,
             'price' => $this->price,
             'stock' => $this->stock,
+            'available_stock' => max(0, (int) $this->stock - (int) $this->reserved_stock),
             // استفاده از ریسورس دسته‌بندی برای ارتباط
             'category' => new CategoryResource($this->whenLoaded('category')),
             // استفاده از کالکشن ریسورس تصاویر برای ارتباط چندتایی

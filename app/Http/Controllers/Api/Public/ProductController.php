@@ -55,14 +55,14 @@ class ProductController extends Controller
             $query->where('price', '<=', $filters['max_price']);
         }
 
-        // فقط محصولات موجود یا ناموجود
+        // فیلتر موجودی بر اساس تعداد واقعی قابل خرید پس از کسر رزروها.
         if (array_key_exists('in_stock', $filters)) {
             $inStock = filter_var($filters['in_stock'], FILTER_VALIDATE_BOOLEAN);
 
             if ($inStock) {
-                $query->where('stock', '>', 0);
+                $query->whereRaw('(stock - reserved_stock) > 0');
             } else {
-                $query->where('stock', '<=', 0);
+                $query->whereRaw('(stock - reserved_stock) <= 0');
             }
         }
 

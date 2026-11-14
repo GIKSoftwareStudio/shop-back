@@ -31,13 +31,15 @@ class CheckoutController extends Controller
             ], 500);
         }
 
+
         $order = DB::transaction(function () use ($items, $maxAmount) {
             $totalCents = 0;
             $orderItems = [];
 
             foreach ($items as $item) {
+                $quantity = (int) $item['quantity'];
+
                 $product = Product::whereKey($item['product_id'])
-                    ->lockForUpdate()
                     ->first();
 
                 if (! $product) {
@@ -46,11 +48,14 @@ class CheckoutController extends Controller
                     ]);
                 }
 
-                $quantity = (int) $item['quantity'];
+                // رزرو اتمیک موجودی؛ موجودی واقعی تغییر نمی‌کند.
+                $reserved = Product::whereKey($product->id)
+                    ->whereRaw('(stock - reserved_stock) >= ?', [$quantity])
+                    ->increment('reserved_stock', $quantity);
 
-                if ($product->stock < $quantity) {
+                if ($reserved !== 1) {
                     throw ValidationException::withMessages([
-                        'items' => "موجودی محصول {$product->name} کافی نیست.",
+                        'items' => "موجودی قابل خرید محصول {$product->name} کافی نیست.",
                     ]);
                 }
 
@@ -79,8 +84,6 @@ class CheckoutController extends Controller
                     'quantity' => $quantity,
                     'unit_price' => $product->price,
                 ];
-
-                $product->decrement('stock', $quantity);
             }
 
             // زرین‌پال مبلغ صحیح تومان دریافت می‌کند.
@@ -102,6 +105,7 @@ class CheckoutController extends Controller
                 'user_id' => auth()->id(),
                 'total_amount' => $amountInToman,
                 'status' => 'pending',
+                'stock_status' => 'reserved',
                 'payment_token' => null,
             ]);
 
@@ -109,6 +113,7 @@ class CheckoutController extends Controller
 
             return $order;
         });
+
 
         $callbackUrl = url('/api/payment/callback');
 

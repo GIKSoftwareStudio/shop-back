@@ -30,9 +30,9 @@ Route::get('/products/{product}', [ProductController::class, 'show']);
 Route::post('/cart/prices', [CartController::class, 'prices']);
 
 // ثبت سفارش
-// ثبت سفارش فقط برای کاربران واردشده
+// ثبت سفارش برای کاربران واردشده و مشتریان مهمان با محدودیت تعداد درخواست
 Route::post('/checkout', [CheckoutController::class, 'store'])
-    ->middleware(['auth:sanctum', 'throttle:5,1']);
+    ->middleware('throttle:5,1');
 
 // دریافت وضعیت پرداخت سفارش توسط صاحب سفارش
 Route::get('/orders/{order}/status', [OrderStatusController::class, 'show'])
