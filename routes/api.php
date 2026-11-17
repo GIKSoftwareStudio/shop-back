@@ -35,12 +35,10 @@ Route::post('/checkout', [CheckoutController::class, 'store'])
     ->middleware('throttle:5,1');
 
 // دریافت وضعیت پرداخت سفارش توسط صاحب سفارش
-Route::get('/orders/{order}/status', [OrderStatusController::class, 'show'])
-    ->middleware('auth:sanctum');
+Route::get('/orders/{order}/status', [OrderStatusController::class, 'show']);
 
 // بخش مدیریت
 Route::prefix('admin')
-    ->middleware(['auth:sanctum', 'admin'])
     ->group(function () {
         Route::apiResource('categories', AdminCategoryController::class);
         Route::apiResource('products', AdminProductController::class);
