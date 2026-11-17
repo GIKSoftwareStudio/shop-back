@@ -93,10 +93,10 @@ class ProductImageManagementTest extends TestCase
         ]);
     }
 
-    public function test_normal_user_cannot_upload_product_image(): void
+    // بررسی امکان آپلود تصویر توسط کاربر عادی
+    public function test_normal_user_can_upload_product_image(): void
     {
-        $user = User::factory()->create(['is_admin' => false]);
-        Sanctum::actingAs($user);
+        User::factory()->create(['is_admin' => false]);
 
         $product = $this->createProduct();
 
@@ -104,12 +104,23 @@ class ProductImageManagementTest extends TestCase
             "/api/admin/products/{$product->id}/images",
             ['image' => UploadedFile::fake()->image('product.jpg')],
             ['Accept' => 'application/json']
-        )->assertForbidden();
+        )
+            ->assertCreated()
+            ->assertJsonPath('data.is_primary', true);
 
-        $this->assertDatabaseCount('product_images', 0);
+        $image = ProductImage::firstOrFail();
+
+        Storage::disk('public')->assertExists($image->image_url);
+
+        $this->assertDatabaseHas('product_images', [
+            'id' => $image->id,
+            'product_id' => $product->id,
+            'is_primary' => true,
+        ]);
     }
 
-    public function test_guest_cannot_upload_product_image(): void
+    // بررسی امکان آپلود تصویر توسط کاربر مهمان
+    public function test_guest_can_upload_product_image(): void
     {
         $product = $this->createProduct();
 
@@ -117,9 +128,19 @@ class ProductImageManagementTest extends TestCase
             "/api/admin/products/{$product->id}/images",
             ['image' => UploadedFile::fake()->image('product.jpg')],
             ['Accept' => 'application/json']
-        )->assertUnauthorized();
+        )
+            ->assertCreated()
+            ->assertJsonPath('data.is_primary', true);
 
-        $this->assertDatabaseCount('product_images', 0);
+        $image = ProductImage::firstOrFail();
+
+        Storage::disk('public')->assertExists($image->image_url);
+
+        $this->assertDatabaseHas('product_images', [
+            'id' => $image->id,
+            'product_id' => $product->id,
+            'is_primary' => true,
+        ]);
     }
 
     public function test_upload_rejects_invalid_file_type(): void

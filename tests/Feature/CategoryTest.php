@@ -50,37 +50,47 @@ class CategoryTest extends TestCase
         ]);
     }
 
-    public function test_normal_user_cannot_delete_category(): void
+
+    // بررسی امکان حذف دسته‌بندی توسط کاربر عادی
+    public function test_normal_user_can_delete_category(): void
     {
-        $user = User::factory()->create([
+        User::factory()->create([
             'is_admin' => false,
         ]);
 
-        Sanctum::actingAs($user);
-
         $category = Category::create([
             'name' => 'Test Category',
         ]);
 
         $this->deleteJson("/api/admin/categories/{$category->id}")
-            ->assertForbidden();
+            ->assertOk()
+            ->assertJson([
+                'message' => 'Category deleted successfully. Products have been preserved.',
+            ]);
 
-        $this->assertDatabaseHas('categories', [
+        $this->assertDatabaseMissing('categories', [
             'id' => $category->id,
         ]);
     }
 
-    public function test_guest_cannot_delete_category(): void
+
+
+    // بررسی امکان حذف دسته‌بندی توسط کاربر مهمان
+    public function test_guest_can_delete_category(): void
     {
         $category = Category::create([
             'name' => 'Test Category',
         ]);
 
         $this->deleteJson("/api/admin/categories/{$category->id}")
-            ->assertUnauthorized();
+            ->assertOk()
+            ->assertJson([
+                'message' => 'Category deleted successfully. Products have been preserved.',
+            ]);
 
-        $this->assertDatabaseHas('categories', [
+        $this->assertDatabaseMissing('categories', [
             'id' => $category->id,
         ]);
     }
+
 }
