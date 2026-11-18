@@ -5,12 +5,15 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Order;
 use App\Services\PaymentFinalizationService;
+use App\Services\PaymentGatewayService;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Str;
 use Shetabit\Multipay\Exceptions\PreviouslyVerifiedException;
 use Throwable;
-use App\Services\PaymentGatewayService;
 
 class PaymentController extends Controller
 {
@@ -30,16 +33,25 @@ class PaymentController extends Controller
             $transactionId = $request->query('Authority');
 
             if (! in_array($request->query('Status'), ['OK', 'NOK'], true)) {
-                return response()->json([
-                    'message' => 'پارامترهای Callback معتبر نیستند.',
-                ], 400);
+                return $this->failureResponse(
+                    $request,
+                    'پارامترهای Callback معتبر نیستند.',
+                    400,
+                    [],
+                    null,
+                    'invalid'
+                );
             }
 
             if ($request->query('Status') === 'NOK') {
-                return response()->json([
-                    'message' => 'نتیجه پرداخت قطعی نیست؛ سفارش در انتظار بررسی باقی ماند.',
-                    'status' => 'pending',
-                ], 202);
+                return $this->failureResponse(
+                    $request,
+                    'نتیجه پرداخت قطعی نیست؛ سفارش در انتظار بررسی باقی ماند.',
+                    202,
+                    ['status' => 'pending'],
+                    $this->findOrder($paymentDriver, $transactionId),
+                    'canceled'
+                );
             }
         }
 
@@ -49,10 +61,14 @@ class PaymentController extends Controller
             $transactionId = $request->query('trackId');
 
             if (! in_array((string) $request->query('success'), ['1', '2'], true)) {
-                return response()->json([
-                    'message' => 'پرداخت در زیبال موفق اعلام نشده است.',
-                    'status' => 'pending',
-                ], 202);
+                return $this->failureResponse(
+                    $request,
+                    'پرداخت در زیبال موفق اعلام نشده است.',
+                    202,
+                    ['status' => 'pending'],
+                    $this->findOrder($paymentDriver, $transactionId),
+                    'canceled'
+                );
             }
         }
 
@@ -61,43 +77,55 @@ class PaymentController extends Controller
             ! is_string($transactionId)
             && ! is_int($transactionId)
         ) {
-            return response()->json([
-                'message' => 'پارامترهای Callback معتبر نیستند.',
-            ], 400);
+            return $this->failureResponse(
+                $request,
+                'پارامترهای Callback معتبر نیستند.',
+                400,
+                [],
+                null,
+                'invalid'
+            );
         }
 
         if (trim((string) $transactionId) === '') {
-            return response()->json([
-                'message' => 'شناسه تراکنش معتبر نیست.',
-            ], 400);
+            return $this->failureResponse(
+                $request,
+                'شناسه تراکنش معتبر نیست.',
+                400,
+                [],
+                null,
+                'invalid'
+            );
         }
 
         // پیدا کردن سفارش متعلق به تراکنش بازگشتی.
-        $order = Order::where('payment_token', (string) $transactionId)
-            ->where('payment_driver', $paymentDriver)
-            ->first();
+        $order = $this->findOrder($paymentDriver, $transactionId);
 
         if (! $order) {
-            return response()->json([
-                'message' => 'سفارش یافت نشد.',
-            ], 404);
+            return $this->failureResponse(
+                $request,
+                'سفارش یافت نشد.',
+                404,
+                [],
+                null,
+                'not-found'
+            );
         }
 
         // جلوگیری از تأیید مجدد سفارش پرداخت‌شده.
         if ($order->status === 'paid') {
-            return response()->json([
-                'message' => 'این پرداخت قبلاً تأیید شده است.',
-                'order_id' => $order->id,
-                'ref_id' => $order->payment_reference,
-                'status' => 'paid',
-            ]);
+            return $this->successResponse($request, $order, true);
         }
 
         if ($order->status !== 'pending') {
-            return response()->json([
-                'message' => 'این سفارش قابل پرداخت نیست.',
-                'status' => $order->status,
-            ], 409);
+            return $this->failureResponse(
+                $request,
+                'این سفارش قابل پرداخت نیست.',
+                409,
+                ['status' => $order->status],
+                $order,
+                'not-payable'
+            );
         }
 
         // ایجاد قفل برای جلوگیری از تأیید هم‌زمان یک سفارش.
@@ -121,11 +149,17 @@ class PaymentController extends Controller
             ]);
 
         if ($verificationClaimed === 0) {
-            return response()->json([
-                'message' => 'بررسی پرداخت در حال انجام است یا سفارش نیازمند بررسی مجدد است.',
-                'order_id' => $order->id,
-                'status' => 'pending',
-            ], 202);
+            return $this->failureResponse(
+                $request,
+                'بررسی پرداخت در حال انجام است یا سفارش نیازمند بررسی مجدد است.',
+                202,
+                [
+                    'order_id' => $order->id,
+                    'status' => 'pending',
+                ],
+                $order,
+                'in-progress'
+            );
         }
 
         try {
@@ -144,11 +178,17 @@ class PaymentController extends Controller
 
             $this->releaseVerificationLock($order, $verificationToken);
 
-            return response()->json([
-                'message' => 'تراکنش قبلاً در درگاه تأیید شده است؛ سفارش برای بررسی دستی باقی ماند.',
-                'order_id' => $order->id,
-                'status' => 'pending',
-            ], 202);
+            return $this->failureResponse(
+                $request,
+                'تراکنش قبلاً در درگاه تأیید شده است؛ سفارش برای بررسی دستی باقی ماند.',
+                202,
+                [
+                    'order_id' => $order->id,
+                    'status' => 'pending',
+                ],
+                $order,
+                'uncertain'
+            );
         } catch (Throwable $exception) {
             Log::error('Payment verification failed.', [
                 'order_id' => $order->id,
@@ -159,11 +199,17 @@ class PaymentController extends Controller
 
             $this->releaseVerificationLock($order, $verificationToken);
 
-            return response()->json([
-                'message' => 'تأیید پرداخت انجام نشد یا نتیجه آن قطعی نیست؛ سفارش نیازمند بررسی است.',
-                'order_id' => $order->id,
-                'status' => 'pending',
-            ], 503);
+            return $this->failureResponse(
+                $request,
+                'تأیید پرداخت انجام نشد یا نتیجه آن قطعی نیست؛ سفارش نیازمند بررسی است.',
+                503,
+                [
+                    'order_id' => $order->id,
+                    'status' => 'pending',
+                ],
+                $order,
+                'uncertain'
+            );
         }
 
         try {
@@ -182,20 +228,105 @@ class PaymentController extends Controller
 
             $this->releaseVerificationLock($order, $verificationToken);
 
-            return response()->json([
-                'message' => 'تأیید پرداخت انجام شد، اما نهایی‌سازی سفارش نیازمند بررسی مجدد است.',
-                'order_id' => $order->id,
-                'status' => 'pending',
-            ], 503);
+            return $this->failureResponse(
+                $request,
+                'تأیید پرداخت انجام شد، اما نهایی‌سازی سفارش نیازمند بررسی مجدد است.',
+                503,
+                [
+                    'order_id' => $order->id,
+                    'status' => 'pending',
+                ],
+                $order,
+                'not-confirmed'
+            );
         }
 
-        return response()->json([
-            'message' => 'پرداخت با موفقیت تأیید شد.',
-            'order_id' => $finalizedOrder->id,
-            'ref_id' => $finalizedOrder->payment_reference,
-            'paid_at' => $finalizedOrder->paid_at,
-            'status' => 'paid',
-        ]);
+        return $this->successResponse($request, $finalizedOrder, false);
+    }
+
+    /**
+     * پاسخ موفق؛ برای مرورگر به صفحه پرداخت موفق و برای API به JSON.
+     */
+    private function successResponse(
+        Request $request,
+        Order $order,
+        bool $alreadyPaid
+    ): JsonResponse|RedirectResponse {
+        if ($request->expectsJson()) {
+            return response()->json([
+                'message' => $alreadyPaid
+                    ? 'این پرداخت قبلاً تأیید شده است.'
+                    : 'پرداخت با موفقیت تأیید شد.',
+                'order_id' => $order->id,
+                'ref_id' => $order->payment_reference,
+                'paid_at' => $order->paid_at,
+                'status' => 'paid',
+            ]);
+        }
+
+        return $this->redirectToResult('payment.success', $order);
+    }
+
+    /**
+     * پاسخ ناموفق یا در انتظار بررسی؛ برای مرورگر به صفحه پرداخت ناموفق و برای API به JSON.
+     */
+    private function failureResponse(
+        Request $request,
+        string $message,
+        int $status,
+        array $data = [],
+        ?Order $order = null,
+        string $reason = 'failed'
+    ): JsonResponse|RedirectResponse {
+        if ($request->expectsJson()) {
+            return response()->json(
+                ['message' => $message] + $data,
+                $status
+            );
+        }
+
+        return $this->redirectToResult('payment.failed', $order, $reason);
+    }
+
+    /**
+     * ساخت لینک امضاشده صفحه نتیجه تا اطلاعات سفارش قابل دستکاری نباشد.
+     */
+    private function redirectToResult(
+        string $route,
+        ?Order $order = null,
+        ?string $reason = null
+    ): RedirectResponse {
+        $parameters = [];
+
+        if ($order) {
+            $parameters['order'] = $order->id;
+        }
+
+        if ($reason !== null) {
+            $parameters['reason'] = $reason;
+        }
+
+        return redirect()->to(URL::signedRoute($route, $parameters));
+    }
+
+    /**
+     * یافتن سفارش بر اساس شناسه تراکنش و درگاه.
+     */
+    private function findOrder(
+        ?string $paymentDriver,
+        mixed $transactionId
+    ): ?Order {
+        if (
+            $paymentDriver === null
+            || (! is_string($transactionId) && ! is_int($transactionId))
+            || trim((string) $transactionId) === ''
+        ) {
+            return null;
+        }
+
+        return Order::where('payment_token', (string) $transactionId)
+            ->where('payment_driver', $paymentDriver)
+            ->first();
     }
 
     // آزاد کردن قفل تأیید فقط برای همان درخواست مالک قفل.
