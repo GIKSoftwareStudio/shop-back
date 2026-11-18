@@ -41,4 +41,13 @@
     </dl>
 
     <a class="button button--success" href="{{ url('/') }}">بازگشت به فروشگاه</a>
+
+    {{-- پس از پرداخت تأییدشده، سبد خرید فرانت‌اند پاک می‌شود. --}}
+    <script>
+        try {
+            localStorage.removeItem('shop-front-cart');
+        } catch (error) {
+            // در صورت نبودن دسترسی به localStorage، صفحه بدون خطا ادامه می‌یابد.
+        }
+    </script>
 @endsection

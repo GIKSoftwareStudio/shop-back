@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Order;
+use App\Services\PaymentStatusResolver;
 use DateTimeInterface;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -15,15 +16,34 @@ class PaymentResultController extends Controller
     /**
      * نمایش صفحه پرداخت موفق.
      */
-    public function success(Request $request): View|RedirectResponse
-    {
-        $order = Order::query()->findOrFail($request->integer('order'));
+    public function success(
+        Request $request,
+        PaymentStatusResolver $statusResolver
+    ): View|RedirectResponse {
+        // دسترسی بدون لینک امضاشده، خطای ۴۰۳ نشان نمی‌دهد.
+        if (! $request->hasValidSignature()) {
+            return $this->failureView(null, 'invalid-link');
+        }
+
+        $order = $this->findOrder($request);
+
+        // سفارش ناموجود یا حذف‌شده باعث خطای 404 نمی‌شود.
+        if (! $order) {
+            return $this->failureView(null, 'not-found');
+        }
+
+        // اگر وضعیت سفارش هنوز قطعی نیست، از درگاه استعلام می‌گیریم.
+        if ($order->status === 'pending') {
+            $order = $statusResolver->refresh($order);
+        }
 
         // اگر سفارش هنوز پرداخت‌شده نیست، نتیجه ناموفق نمایش داده می‌شود.
         if ($order->status !== 'paid') {
             return redirect()->to(URL::signedRoute('payment.failed', [
                 'order' => $order->id,
-                'reason' => 'not-confirmed',
+                'reason' => $order->status === 'failed'
+                    ? 'failed'
+                    : 'in-progress',
             ]));
         }
 
@@ -37,15 +57,28 @@ class PaymentResultController extends Controller
     /**
      * نمایش صفحه پرداخت ناموفق یا در حال بررسی.
      */
-    public function failed(Request $request): View|RedirectResponse
-    {
-        $order = null;
-
-        if ($request->filled('order')) {
-            $order = Order::query()->find($request->integer('order'));
+    public function failed(
+        Request $request,
+        PaymentStatusResolver $statusResolver
+    ): View|RedirectResponse {
+        // دسترسی بدون لینک امضاشده، خطای ۴۰۳ نشان نمی‌دهد.
+        if (! $request->hasValidSignature()) {
+            return $this->failureView(null, 'invalid-link');
         }
 
-        // اگر سفارش در واقع پرداخت شده است، نتیجه موفق نمایش داده می‌شود.
+        $order = $this->findOrder($request);
+
+        // سفارش ناموجود یا حذف‌شده باعث خطای 404 نمی‌شود.
+        if ($request->filled('order') && ! $order) {
+            return $this->failureView(null, 'not-found');
+        }
+
+        // وضعیت سفارش‌های در انتظار را مستقیماً از درگاه استعلام می‌کنیم.
+        if ($order && $order->status === 'pending') {
+            $order = $statusResolver->refresh($order);
+        }
+
+        // اگر درگاه پرداخت را تأیید کرده باشد، نتیجه موفق نمایش داده می‌شود.
         if ($order && $order->status === 'paid') {
             return redirect()->to(URL::signedRoute('payment.success', [
                 'order' => $order->id,
@@ -54,9 +87,23 @@ class PaymentResultController extends Controller
 
         $reason = (string) $request->query('reason', 'failed');
 
+        // اگر درگاه پرداخت را قطعاً ناموفق اعلام کرده باشد.
+        if ($order && $order->status === 'failed') {
+            $reason = 'failed';
+        }
+
+        return $this->failureView($order, $reason);
+    }
+
+    /**
+     * ساخت صفحه ناموفق با پیام متناسب با دلیل.
+     */
+    private function failureView(?Order $order, string $reason): View
+    {
         $messages = [
             'canceled' => 'پرداخت توسط شما لغو شد یا درگاه پرداخت آن را تأیید نکرد.',
             'invalid' => 'اطلاعات دریافتی از درگاه پرداخت معتبر نیست.',
+            'invalid-link' => 'لینک نتیجه پرداخت معتبر نیست یا منقضی شده است.',
             'not-found' => 'سفارش مربوط به این پرداخت پیدا نشد.',
             'not-payable' => 'این سفارش در وضعیت فعلی قابل پرداخت نیست.',
             'in-progress' => 'نتیجه پرداخت هنوز قطعی نشده و سفارش در حال بررسی است.',
@@ -83,6 +130,20 @@ class PaymentResultController extends Controller
                 ? $this->statusLabel($order->status)
                 : null,
         ]);
+    }
+
+    /**
+     * یافتن سفارش بر اساس شناسه ارسال‌شده در لینک امضاشده.
+     */
+    private function findOrder(Request $request): ?Order
+    {
+        $orderId = $request->integer('order');
+
+        if ($orderId <= 0) {
+            return null;
+        }
+
+        return Order::query()->find($orderId);
     }
 
     /**

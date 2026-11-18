@@ -44,7 +44,7 @@
         </dl>
     @endif
 
-    @if (! in_array($reason, ['invalid', 'not-found'], true))
+    @if (! in_array($reason, ['invalid', 'invalid-link', 'not-found'], true))
         <div class="note">
             <strong>اگر مبلغی از حساب شما کسر شده باشد</strong>
             این مبلغ حداکثر تا ۷۲ ساعت آینده به حساب شما بازگردانده می‌شود.
