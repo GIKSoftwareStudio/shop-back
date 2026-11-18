@@ -15,6 +15,14 @@ class CheckoutRequest extends FormRequest
     public function rules(): array
     {
         return [
+            // تعیین درگاه پرداخت؛ در صورت عدم ارسال، زرین‌پال انتخاب می‌شود.
+            'payment_driver' => [
+                'sometimes',
+                'required',
+                'string',
+                'in:zarinpal,zibal',
+            ],
+
             'items' => ['required', 'array', 'min:1'],
 
             'items.*' => [

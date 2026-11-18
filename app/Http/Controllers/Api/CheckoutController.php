@@ -2,26 +2,27 @@
 
 namespace App\Http\Controllers\Api;
 
-use AbolfazlAhmadi\LaravelZarinpal\Services\ZarinpalService;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\CheckoutRequest;
 use App\Models\Order;
 use App\Models\Product;
-use Illuminate\Http\Client\ConnectionException;
-use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
-use RuntimeException;
 use Illuminate\Support\Facades\Log;
 use Throwable;
+use App\Services\PaymentGatewayService;
 
 class CheckoutController extends Controller
 {
+    // دریافت سرویس مشترک مدیریت درگاه‌های پرداخت.
     public function store(
         CheckoutRequest $request,
-        ZarinpalService $zarinpal
+        PaymentGatewayService $paymentGateway
     ) {
-        $items = $request->validated()['items'];
+        // دریافت اقلام سفارش و درگاه انتخاب‌شده توسط کاربر.
+        $validated = $request->validated();
+        $items = $validated['items'];
+        $paymentDriver = $validated['payment_driver'] ?? 'zarinpal';
 
         $maxAmount = (int) config('zarinpal.max_amount');
 
@@ -32,7 +33,7 @@ class CheckoutController extends Controller
         }
 
 
-        $order = DB::transaction(function () use ($items, $maxAmount) {
+        $order = DB::transaction(function () use ($items, $maxAmount, $paymentDriver) {
             $totalCents = 0;
             $orderItems = [];
 
@@ -107,6 +108,7 @@ class CheckoutController extends Controller
                 'status' => 'pending',
                 'stock_status' => 'reserved',
                 'payment_token' => null,
+                'payment_driver' => $paymentDriver,
             ]);
 
             $order->items()->createMany($orderItems);
@@ -114,79 +116,24 @@ class CheckoutController extends Controller
             return $order;
         });
 
-
+        // ارسال درخواست پرداخت به درگاه انتخاب‌شده.
         $callbackUrl = url('/api/payment/callback');
 
         try {
-            $payment = $zarinpal->request(
-                (int) $order->total_amount,
-                'پرداخت سفارش #' . $order->id,
-                $callbackUrl
-            );
-        } catch (RuntimeException $exception) {
-            Log::warning('Zarinpal payment request result is unconfirmed.', [
-                'order_id' => $order->id,
-                'exception' => $exception->getMessage(),
-            ]);
+            $payment = $paymentGateway->start($order, $callbackUrl);
 
-            return response()->json([
-                'message' => 'نتیجه درخواست پرداخت از درگاه قطعی نیست؛ سفارش در انتظار بررسی باقی مانده است.',
-                'order_id' => $order->id,
-                'status' => 'pending',
-            ], 503);
-        } catch (ConnectionException|RequestException $exception) {
-            Log::warning('Zarinpal payment request has an uncertain result.', [
-                'order_id' => $order->id,
-                'exception_class' => get_class($exception),
-                'exception' => $exception->getMessage(),
-            ]);
-
-            return response()->json([
-                'message' => 'ارتباط با درگاه پرداخت قطع شد. وضعیت سفارش نیازمند بررسی است.',
-                'order_id' => $order->id,
-                'status' => 'pending',
-            ], 503);
+            $transactionId = $payment['transaction_id'];
+            $paymentUrl = $payment['payment_url'];
         } catch (Throwable $exception) {
-            Log::error('Unexpected error during Zarinpal payment request.', [
+            Log::error('Payment gateway request failed or returned an uncertain result.', [
                 'order_id' => $order->id,
+                'payment_driver' => $paymentDriver,
                 'exception_class' => get_class($exception),
                 'exception' => $exception->getMessage(),
             ]);
 
             return response()->json([
-                'message' => 'خطای پیش‌بینی‌نشده هنگام ارتباط با درگاه رخ داد. وضعیت سفارش نیازمند بررسی است.',
-                'order_id' => $order->id,
-                'status' => 'pending',
-            ], 503);
-        }
-
-        $authority = $payment['authority'] ?? null;
-        $paymentUrl = $payment['url'] ?? null;
-
-        $expectedHost = config('zarinpal.sandbox')
-            ? 'sandbox.zarinpal.com'
-            : 'payment.zarinpal.com';
-
-        $urlParts = is_string($paymentUrl) ? parse_url($paymentUrl) : false;
-
-        $validPaymentResponse =
-            is_string($authority)
-            && $authority !== ''
-            && is_array($urlParts)
-            && ($urlParts['scheme'] ?? null) === 'https'
-            && ($urlParts['host'] ?? null) === $expectedHost
-            && str_starts_with($urlParts['path'] ?? '', '/pg/StartPay/')
-            && basename($urlParts['path'] ?? '') === $authority;
-
-        if (! $validPaymentResponse) {
-            Log::error('Zarinpal returned an invalid payment response.', [
-                'order_id' => $order->id,
-                'has_authority' => is_string($authority) && $authority !== '',
-                'has_valid_url' => is_array($urlParts),
-            ]);
-
-            return response()->json([
-                'message' => 'پاسخ درگاه پرداخت معتبر نیست. وضعیت سفارش نیازمند بررسی است.',
+                'message' => 'نتیجه درخواست پرداخت قطعی نیست؛ سفارش در انتظار بررسی باقی مانده است.',
                 'order_id' => $order->id,
                 'status' => 'pending',
             ], 503);
@@ -194,10 +141,10 @@ class CheckoutController extends Controller
 
         try {
             $order->update([
-                'payment_token' => $authority,
+                'payment_token' => $transactionId,
             ]);
         } catch (Throwable $exception) {
-            Log::critical('Could not save Zarinpal authority for order.', [
+            Log::critical('Could not save payment transaction ID for order.', [
                 'order_id' => $order->id,
                 'exception_class' => get_class($exception),
                 'exception' => $exception->getMessage(),

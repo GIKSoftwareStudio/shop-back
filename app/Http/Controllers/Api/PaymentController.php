@@ -2,35 +2,80 @@
 
 namespace App\Http\Controllers\Api;
 
-use AbolfazlAhmadi\LaravelZarinpal\Services\ZarinpalService;
 use App\Http\Controllers\Controller;
 use App\Models\Order;
 use App\Services\PaymentFinalizationService;
-use Illuminate\Http\Client\ConnectionException;
-use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Request;
-use RuntimeException;
 use Illuminate\Support\Facades\Log;
-use Throwable;
 use Illuminate\Support\Str;
+use Shetabit\Multipay\Exceptions\PreviouslyVerifiedException;
+use Throwable;
+use App\Services\PaymentGatewayService;
 
 class PaymentController extends Controller
 {
+    // دریافت Callback و تأیید پرداخت بر اساس درگاه انتخاب‌شده.
     public function callback(
         Request $request,
-        ZarinpalService $zarinpal,
-        PaymentFinalizationService $finalizationService
+        PaymentFinalizationService $finalizationService,
+        PaymentGatewayService $paymentGateway
     ) {
-        $authority = $request->query('Authority');
-        $status = $request->query('Status');
+        // تشخیص شناسه تراکنش و وضعیت بازگشتی درگاه.
+        $paymentDriver = null;
+        $transactionId = null;
 
-        if (! $authority || ! in_array($status, ['OK', 'NOK'], true)) {
+        // استخراج پارامترهای Callback زرین‌پال.
+        if ($request->has('Authority')) {
+            $paymentDriver = 'zarinpal';
+            $transactionId = $request->query('Authority');
+
+            if (! in_array($request->query('Status'), ['OK', 'NOK'], true)) {
+                return response()->json([
+                    'message' => 'پارامترهای Callback معتبر نیستند.',
+                ], 400);
+            }
+
+            if ($request->query('Status') === 'NOK') {
+                return response()->json([
+                    'message' => 'نتیجه پرداخت قطعی نیست؛ سفارش در انتظار بررسی باقی ماند.',
+                    'status' => 'pending',
+                ], 202);
+            }
+        }
+
+        // استخراج پارامترهای Callback زیبال.
+        elseif ($request->has('trackId')) {
+            $paymentDriver = 'zibal';
+            $transactionId = $request->query('trackId');
+
+            if (! in_array((string) $request->query('success'), ['1', '2'], true)) {
+                return response()->json([
+                    'message' => 'پرداخت در زیبال موفق اعلام نشده است.',
+                    'status' => 'pending',
+                ], 202);
+            }
+        }
+
+        // بررسی اعتبار شناسه تراکنش.
+        if (
+            ! is_string($transactionId)
+            && ! is_int($transactionId)
+        ) {
             return response()->json([
                 'message' => 'پارامترهای Callback معتبر نیستند.',
             ], 400);
         }
 
-        $order = Order::where('payment_token', $authority)->first();
+        if (trim((string) $transactionId) === '') {
+            return response()->json([
+                'message' => 'شناسه تراکنش معتبر نیست.',
+            ], 400);
+        }
+
+        // پیدا کردن سفارش متعلق به تراکنش بازگشتی.
+        $order = Order::where('payment_token', (string) $transactionId)
+            ->where('payment_driver', $paymentDriver)
+            ->first();
 
         if (! $order) {
             return response()->json([
@@ -38,6 +83,7 @@ class PaymentController extends Controller
             ], 404);
         }
 
+        // جلوگیری از تأیید مجدد سفارش پرداخت‌شده.
         if ($order->status === 'paid') {
             return response()->json([
                 'message' => 'این پرداخت قبلاً تأیید شده است.',
@@ -54,18 +100,7 @@ class PaymentController extends Controller
             ], 409);
         }
 
-        if ($status === 'NOK') {
-            Log::info('Zarinpal returned NOK callback. Order remains pending.', [
-                'order_id' => $order->id,
-            ]);
-
-            return response()->json([
-                'message' => 'نتیجه پرداخت قطعی نیست؛ سفارش برای بررسی مجدد در انتظار باقی ماند.',
-                'order_id' => $order->id,
-                'status' => 'pending',
-            ], 202);
-        }
-
+        // ایجاد قفل برای جلوگیری از تأیید هم‌زمان یک سفارش.
         $verificationStartedAt = now();
         $staleVerificationTime = now()->subMinutes(2);
         $verificationToken = (string) Str::uuid();
@@ -94,40 +129,30 @@ class PaymentController extends Controller
         }
 
         try {
-            $verification = $zarinpal->verify(
-                $authority,
-                (int) $order->total_amount
+            // تأیید تراکنش از طریق سرویس مشترک درگاه‌های پرداخت.
+            $refId = $paymentGateway->verify(
+                $order,
+                (string) $transactionId
             );
-        } catch (ConnectionException|RequestException $exception) {
-            Log::warning('Zarinpal verification connection failed.', [
+        } catch (PreviouslyVerifiedException $exception) {
+            // تراکنش قبلاً تأیید شده اما شناسه مرجع آن در دسترس نیست.
+            Log::warning('Payment gateway reports a previously verified transaction.', [
                 'order_id' => $order->id,
-                'exception_class' => get_class($exception),
-                'exception' => $exception->getMessage(),
+                'payment_driver' => $paymentDriver,
+                'transaction_id' => $transactionId,
             ]);
 
             $this->releaseVerificationLock($order, $verificationToken);
 
             return response()->json([
-                'message' => 'ارتباط با درگاه برقرار نشد؛ وضعیت پرداخت نیازمند بررسی مجدد است.',
+                'message' => 'تراکنش قبلاً در درگاه تأیید شده است؛ سفارش برای بررسی دستی باقی ماند.',
                 'order_id' => $order->id,
                 'status' => 'pending',
-            ], 503);
-        } catch (RuntimeException $exception) {
-            Log::warning('Zarinpal verification result is not confirmed.', [
-                'order_id' => $order->id,
-                'exception' => $exception->getMessage(),
-            ]);
-
-            $this->releaseVerificationLock($order, $verificationToken);
-
-            return response()->json([
-                'message' => 'نتیجه پرداخت قطعی نیست؛ سفارش برای بررسی مجدد در انتظار باقی ماند.',
-                'order_id' => $order->id,
-                'status' => 'pending',
-            ], 503);
+            ], 202);
         } catch (Throwable $exception) {
-            Log::error('Unexpected error during Zarinpal verification.', [
+            Log::error('Payment verification failed.', [
                 'order_id' => $order->id,
+                'payment_driver' => $paymentDriver,
                 'exception_class' => get_class($exception),
                 'exception' => $exception->getMessage(),
             ]);
@@ -135,34 +160,14 @@ class PaymentController extends Controller
             $this->releaseVerificationLock($order, $verificationToken);
 
             return response()->json([
-                'message' => 'خطای پیش‌بینی‌نشده در بررسی پرداخت رخ داد. وضعیت سفارش نیازمند بررسی است.',
+                'message' => 'تأیید پرداخت انجام نشد یا نتیجه آن قطعی نیست؛ سفارش نیازمند بررسی است.',
                 'order_id' => $order->id,
                 'status' => 'pending',
             ], 503);
         }
-
-        $refId = $verification['ref_id'] ?? null;
-
-        if (
-            (! is_string($refId) && ! is_int($refId))
-            || trim((string) $refId) === ''
-        ) {
-            Log::error('Zarinpal verification returned an invalid reference ID.', [
-                'order_id' => $order->id,
-            ]);
-
-            $this->releaseVerificationLock($order, $verificationToken);
-
-            return response()->json([
-                'message' => 'پاسخ تأیید درگاه معتبر نیست. وضعیت سفارش نیازمند بررسی است.',
-                'order_id' => $order->id,
-                'status' => 'pending',
-            ], 503);
-        }
-
-
 
         try {
+            // نهایی‌سازی پرداخت و کسر موجودی رزروشده.
             $finalizedOrder = $finalizationService->confirmPayment(
                 $order,
                 $refId,
@@ -193,6 +198,7 @@ class PaymentController extends Controller
         ]);
     }
 
+    // آزاد کردن قفل تأیید فقط برای همان درخواست مالک قفل.
     private function releaseVerificationLock(
         Order $order,
         string $verificationToken

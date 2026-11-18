@@ -6,20 +6,23 @@ use AbolfazlAhmadi\LaravelZarinpal\Services\ZarinpalService;
 use App\Models\Order;
 use App\Services\PaymentFinalizationService;
 use App\Services\ZarinpalPaymentStatusService;
+use App\Services\ZibalPaymentStatusService;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use RuntimeException;
 use Throwable;
 
 #[Signature('app:check-pending-payments')]
-#[Description('Check and finalize pending Zarinpal payments')]
+#[Description('Check and finalize pending payments')]
 class CheckPendingPayments extends Command
 {
     public function handle(
-        ZarinpalPaymentStatusService $paymentStatusService,
+        ZarinpalPaymentStatusService $zarinpalStatus,
         ZarinpalService $zarinpal,
+        ZibalPaymentStatusService $zibalStatus,
         PaymentFinalizationService $finalizationService
     ): int {
         $checked = 0;
@@ -27,13 +30,16 @@ class CheckPendingPayments extends Command
         $failed = 0;
         $skipped = 0;
 
+        // سفارش‌های در انتظار پرداخت هر دو درگاه را انتخاب می‌کنیم.
         Order::query()
             ->where('status', 'pending')
+            ->whereIn('payment_driver', ['zarinpal', 'zibal'])
             ->whereNotNull('payment_token')
             ->where('payment_token', '!=', '')
             ->chunkById(100, function ($orders) use (
-                $paymentStatusService,
+                $zarinpalStatus,
                 $zarinpal,
+                $zibalStatus,
                 $finalizationService,
                 &$checked,
                 &$paid,
@@ -55,6 +61,7 @@ class CheckPendingPayments extends Command
                     $verificationStartedAt = now();
                     $staleVerificationTime = now()->subMinutes(2);
 
+                    // برای جلوگیری از بررسی هم‌زمان یک سفارش، قفل موقت می‌گیریم.
                     $claimed = Order::whereKey($order->id)
                         ->where('status', 'pending')
                         ->where(function ($query) use ($staleVerificationTime) {
@@ -81,84 +88,143 @@ class CheckPendingPayments extends Command
                     }
 
                     try {
-                        $result = $paymentStatusService->inquiry(
-                            $order->payment_token
-                        );
+                        $refId = null;
 
-                        $checked++;
-
-                        $status = strtoupper(trim($result['status']));
-
-                        $this->line(
-                            "Order #{$order->id}: "
-                            . "Status={$status}, "
-                            . "Code={$result['code']}"
-                        );
-
-                        if ($status === 'FAILED') {
-                            $finalizedOrder = $finalizationService->failPayment(
-                                $order,
-                                $verificationToken
+                        if ($order->payment_driver === 'zarinpal') {
+                            // استعلام وضعیت و تأیید نهایی سفارش زرین‌پال.
+                            $result = $zarinpalStatus->inquiry(
+                                $order->payment_token
                             );
 
-                            $failed++;
+                            $checked++;
 
-                            $this->components->warn(
-                                "Order #{$finalizedOrder->id}: payment failed; reservation released."
+                            $status = strtoupper(trim($result['status']));
+
+                            $this->line(
+                                "Order #{$order->id}: "
+                                . "Driver=zarinpal, "
+                                . "Status={$status}, "
+                                . "Code={$result['code']}"
                             );
 
-                            continue;
-                        }
+                            if ($status === 'FAILED') {
+                                $finalizedOrder = $finalizationService->failPayment(
+                                    $order,
+                                    $verificationToken
+                                );
 
-                        if (in_array($status, ['PAID', 'VERIFIED'], true)) {
+                                $failed++;
+
+                                $this->components->warn(
+                                    "Order #{$finalizedOrder->id}: payment failed; reservation released."
+                                );
+
+                                continue;
+                            }
+
+                            if (! in_array($status, ['PAID', 'VERIFIED'], true)) {
+                                if ($status === 'REVERSED') {
+                                    $this->components->warn(
+                                        "Order #{$order->id}: payment is reversed; manual review required."
+                                    );
+                                } elseif ($status === 'IN_BANK') {
+                                    $this->line(
+                                        "Order #{$order->id}: payment is still in progress."
+                                    );
+                                } else {
+                                    $this->components->warn(
+                                        "Order #{$order->id}: unknown payment status; kept pending."
+                                    );
+                                }
+
+                                $this->releaseVerificationLock(
+                                    $order,
+                                    $verificationToken
+                                );
+
+                                continue;
+                            }
+
                             $verification = $zarinpal->verify(
                                 $order->payment_token,
                                 (int) $order->total_amount
                             );
 
                             $refId = $verification['ref_id'] ?? null;
+                        } elseif ($order->payment_driver === 'zibal') {
+                            // بررسی مستقیم وضعیت تراکنش زیبال.
+                            $result = $zibalStatus->verify(
+                                $order->payment_token
+                            );
 
-                            if (
-                                (! is_string($refId) && ! is_int($refId))
-                                || trim((string) $refId) === ''
-                            ) {
-                                throw new \RuntimeException(
-                                    'Zarinpal verification returned an invalid reference ID.'
+                            $checked++;
+
+                            $this->line(
+                                "Order #{$order->id}: "
+                                . "Driver=zibal, "
+                                . "Code={$result['code']}"
+                            );
+
+                            if ($result['code'] === 202) {
+                                $finalizedOrder = $finalizationService->failPayment(
+                                    $order,
+                                    $verificationToken
+                                );
+
+                                $failed++;
+
+                                $this->components->warn(
+                                    "Order #{$finalizedOrder->id}: Zibal payment failed; reservation released."
+                                );
+
+                                continue;
+                            }
+
+                            if ($result['code'] === 201) {
+                                $skipped++;
+
+                                $this->components->warn(
+                                    "Order #{$order->id}: Zibal transaction was previously verified; manual review required."
+                                );
+
+                                $this->releaseVerificationLock(
+                                    $order,
+                                    $verificationToken
+                                );
+
+                                continue;
+                            }
+
+                            if ($result['code'] !== 100) {
+                                throw new RuntimeException(
+                                    "Unknown Zibal verification result: {$result['code']}"
                                 );
                             }
 
-                            $finalizedOrder = $finalizationService->confirmPayment(
-                                $order,
-                                $refId,
-                                $verificationToken
-                            );
-
-                            $paid++;
-
-                            $this->info(
-                                "Order #{$finalizedOrder->id}: payment confirmed and inventory deducted."
-                            );
-
-                            continue;
+                            $refId = $result['ref_id'];
                         }
 
-                        if ($status === 'REVERSED') {
-                            $this->components->warn(
-                                "Order #{$order->id}: payment is reversed; manual review required."
-                            );
-                        } elseif ($status === 'IN_BANK') {
-                            $this->line(
-                                "Order #{$order->id}: payment is still in progress."
-                            );
-                        } else {
-                            $this->components->warn(
-                                "Order #{$order->id}: unknown payment status; kept pending."
+                        // شماره مرجع هر دو درگاه باید معتبر باشد.
+                        if (
+                            (! is_string($refId) && ! is_int($refId))
+                            || trim((string) $refId) === ''
+                        ) {
+                            throw new RuntimeException(
+                                'Payment verification returned an invalid reference ID.'
                             );
                         }
 
-                        $this->releaseVerificationLock(
+                        // تأیید پرداخت و کسر موجودی فقط از مسیر سرویس نهایی‌سازی انجام می‌شود.
+                        $finalizedOrder = $finalizationService->confirmPayment(
                             $order,
+                            $refId,
                             $verificationToken
+                        );
+
+                        $paid++;
+
+                        $this->info(
+                            "Order #{$finalizedOrder->id}: payment confirmed and inventory deducted."
                         );
                     } catch (Throwable $exception) {
                         $this->releaseVerificationLock(
@@ -172,6 +238,7 @@ class CheckPendingPayments extends Command
                             'Pending payment processing failed.',
                             [
                                 'order_id' => $order->id,
+                                'payment_driver' => $order->payment_driver,
                                 'exception_class' => get_class($exception),
                                 'message' => $exception->getMessage(),
                             ]
@@ -193,6 +260,7 @@ class CheckPendingPayments extends Command
         return $failed > 0 ? self::FAILURE : self::SUCCESS;
     }
 
+    // قفل بررسی را فقط در صورت تعلق به همین اجرا آزاد می‌کنیم.
     private function releaseVerificationLock(
         Order $order,
         string $verificationToken

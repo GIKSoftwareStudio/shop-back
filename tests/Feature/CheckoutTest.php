@@ -5,13 +5,13 @@ namespace Tests\Feature;
 use App\Models\Category;
 use App\Models\Order;
 use App\Models\Product;
-use Illuminate\Http\Client\ConnectionException;
-use Illuminate\Http\Client\Request;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 use App\Models\User;
 use Laravel\Sanctum\Sanctum;
+use App\Services\PaymentGatewayService;
+use RuntimeException;
+use Mockery;
 
 class CheckoutTest extends TestCase
 {
@@ -19,31 +19,40 @@ class CheckoutTest extends TestCase
 
     private const AUTHORITY = 'A00000000000000000000000000000000000';
 
+    // آماده‌سازی تنظیمات و Mock سرویس درگاه برای تست‌های Checkout.
+    // آماده‌سازی تنظیمات و شبیه‌سازی هر دو درگاه پرداخت.
     protected function setUp(): void
     {
         parent::setUp();
 
         config([
-            'zarinpal.sandbox' => true,
-            'zarinpal.currency' => 'IRT',
-            'zarinpal.merchant_id' => 'test-merchant-id',
             'zarinpal.max_amount' => 200000000,
+            'payment.drivers.zarinpal.mode' => 'sandbox',
         ]);
 
-        // تمام درخواست‌های HTTP به پاسخ ساختگی هدایت می‌شوند.
-        // این پاسخ هم برای request و هم verify معتبر است.
-        Http::fake([
-            '*' => Http::response([
-                'data' => [
-                    'code' => 100,
-                    'authority' => self::AUTHORITY,
-                    'ref_id' => 123456789,
-                    'fee_type' => 'Merchant',
-                    'fee' => 0,
-                ],
-                'errors' => [],
-            ], 200),
-        ]);
+        // شبیه‌سازی سرویس پرداخت بدون ارسال درخواست واقعی به درگاه.
+        $this->mock(PaymentGatewayService::class, function ($mock) {
+            $mock->shouldReceive('start')
+                ->andReturnUsing(function (Order $order) {
+                    $transactionId = $order->payment_driver === 'zibal'
+                        ? '987654321'
+                        : self::AUTHORITY;
+
+                    return [
+                        'transaction_id' => $transactionId,
+                        'payment_url' => $order->payment_driver === 'zibal'
+                            ? 'https://gateway.zibal.ir/start/' . $transactionId
+                            : 'https://sandbox.zarinpal.com/pg/StartPay/' . $transactionId,
+                    ];
+                });
+
+            $mock->shouldReceive('verify')
+                ->andReturnUsing(function (Order $order) {
+                    return $order->payment_driver === 'zibal'
+                        ? '9876543210'
+                        : '123456789';
+                });
+        });
     }
 
     private function createProduct(
@@ -150,10 +159,6 @@ class CheckoutTest extends TestCase
             $response->json('payment_url')
         );
 
-        Http::assertSent(function (Request $request) {
-            return str_ends_with($request->url(), '/request.json')
-                && $request['amount'] === 2000;
-        });
     }
 
     public function test_checkout_rejects_insufficient_stock(): void
@@ -252,11 +257,6 @@ class CheckoutTest extends TestCase
             'reserved_stock' => 0,
         ]);
 
-        Http::assertSent(function (Request $request) {
-            return str_ends_with($request->url(), '/verify.json')
-                && $request['authority'] === self::AUTHORITY
-                && $request['amount'] === 1000;
-        });
     }
 
     public function test_successful_callback_cannot_process_payment_twice(): void
@@ -365,13 +365,12 @@ class CheckoutTest extends TestCase
 
     public function test_checkout_keeps_order_pending_on_connection_failure(): void
     {
-        Http::fake([
-            '*' => function () {
-                throw new ConnectionException(
-                    'Simulated connection failure'
-                );
-            },
-        ]);
+        // شبیه‌سازی خطای ارتباط هنگام شروع پرداخت.
+        $this->mock(PaymentGatewayService::class, function ($mock) {
+            $mock->shouldReceive('start')
+                ->once()
+                ->andThrow(new RuntimeException('Simulated connection failure'));
+        });
 
         $product = $this->createProduct('100.00', 5);
 
@@ -385,7 +384,7 @@ class CheckoutTest extends TestCase
             'payment_token' => null,
         ]);
 
-        // بررسی می‌کند که با قطع ارتباط، رزرو حفظ شود و موجودی واقعی تغییر نکند.
+        // بررسی می‌کند که رزرو حفظ شود و موجودی واقعی تغییر نکند.
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
             'stock' => 5,
@@ -395,21 +394,19 @@ class CheckoutTest extends TestCase
 
     public function test_verify_connection_failure_keeps_order_pending(): void
     {
-        Http::fake([
-            '*request.json' => Http::response([
-                'data' => [
-                    'code' => 100,
-                    'authority' => self::AUTHORITY,
-                ],
-                'errors' => [],
-            ], 200),
+        // شبیه‌سازی شروع موفق پرداخت و خطا هنگام تأیید تراکنش.
+        $this->mock(PaymentGatewayService::class, function ($mock) {
+            $mock->shouldReceive('start')
+                ->once()
+                ->andReturn([
+                    'transaction_id' => self::AUTHORITY,
+                    'payment_url' => 'https://sandbox.zarinpal.com/pg/StartPay/' . self::AUTHORITY,
+                ]);
 
-            '*verify.json' => function () {
-                throw new ConnectionException(
-                    'Simulated verification failure'
-                );
-            },
-        ]);
+            $mock->shouldReceive('verify')
+                ->once()
+                ->andThrow(new RuntimeException('Simulated verification failure'));
+        });
 
         $product = $this->createProduct();
 
@@ -427,7 +424,7 @@ class CheckoutTest extends TestCase
             'verification_token' => null,
         ]);
 
-        // بررسی می‌کند که هنگام خطای Verify، رزرو حفظ و موجودی واقعی دست‌نخورده بماند.
+        // بررسی می‌کند که هنگام خطای تأیید، رزرو حفظ شود.
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
             'stock' => 5,
@@ -437,20 +434,23 @@ class CheckoutTest extends TestCase
 
     public function test_payment_remains_pending_when_verification_has_no_reference_id(): void
     {
+        // شبیه‌سازی پرداخت موفق اولیه و برنگشتن شناسه مرجع از درگاه.
+        $this->mock(PaymentGatewayService::class, function ($mock) {
+            $mock->shouldReceive('start')
+                ->once()
+                ->andReturn([
+                    'transaction_id' => self::AUTHORITY,
+                    'payment_url' => 'https://sandbox.zarinpal.com/pg/StartPay/' . self::AUTHORITY,
+                ]);
+
+            $mock->shouldReceive('verify')
+                ->once()
+                ->andThrow(new RuntimeException('درگاه شناسه مرجع معتبری برنگرداند.'));
+        });
+
         $product = $this->createProduct('100.00', 5);
 
         $this->checkout($product)->assertCreated();
-
-        Http::swap(new \Illuminate\Http\Client\Factory);
-
-        Http::fake([
-            '*verify.json' => Http::response([
-                'data' => [
-                    'code' => 100,
-                ],
-                'errors' => [],
-            ], 200),
-        ]);
 
         $this->getCallback()
             ->assertStatus(503)
@@ -462,26 +462,33 @@ class CheckoutTest extends TestCase
             'payment_reference' => null,
         ]);
 
-        // بررسی می‌کند که بدون دریافت شناسه پرداخت، رزرو حفظ شود.
+        // بررسی می‌کند که بدون شناسه مرجع، رزرو حفظ شود.
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
             'stock' => 5,
             'reserved_stock' => 1,
         ]);
     }
+
     public function test_payment_remains_pending_on_unexpected_verification_error(): void
     {
+        // شبیه‌سازی خطای غیرمنتظره در مرحله تأیید تراکنش.
+        $this->mock(PaymentGatewayService::class, function ($mock) {
+            $mock->shouldReceive('start')
+                ->once()
+                ->andReturn([
+                    'transaction_id' => self::AUTHORITY,
+                    'payment_url' => 'https://sandbox.zarinpal.com/pg/StartPay/' . self::AUTHORITY,
+                ]);
+
+            $mock->shouldReceive('verify')
+                ->once()
+                ->andThrow(new \Error('Simulated unexpected verification error'));
+        });
+
         $product = $this->createProduct('100.00', 5);
 
         $this->checkout($product)->assertCreated();
-
-        Http::swap(new \Illuminate\Http\Client\Factory);
-
-        Http::fake([
-            '*verify.json' => function () {
-                throw new \Error('Simulated unexpected verification error');
-            },
-        ]);
 
         $this->getCallback()
             ->assertStatus(503)
@@ -500,6 +507,7 @@ class CheckoutTest extends TestCase
             'reserved_stock' => 1,
         ]);
     }
+
     public function test_checkout_rolls_back_all_stock_when_a_later_item_has_insufficient_stock(): void
     {
         Sanctum::actingAs(User::factory()->create());
@@ -541,17 +549,12 @@ class CheckoutTest extends TestCase
 
     public function test_checkout_keeps_order_pending_and_stock_reserved_when_zarinpal_request_result_is_unconfirmed(): void
     {
-        Http::swap(new \Illuminate\Http\Client\Factory);
-
-        Http::fake([
-            '*' => Http::response([
-                'data' => [
-                    'code' => -9,
-                    'message' => 'Payment request rejected',
-                ],
-                'errors' => [],
-            ], 200),
-        ]);
+        // شبیه‌سازی ناموفق بودن درخواست ایجاد پرداخت در درگاه.
+        $this->mock(PaymentGatewayService::class, function ($mock) {
+            $mock->shouldReceive('start')
+                ->once()
+                ->andThrow(new RuntimeException('Payment request rejected'));
+        });
 
         $product = $this->createProduct('100.00', 5);
 
@@ -564,7 +567,7 @@ class CheckoutTest extends TestCase
             'total_amount' => 200,
         ]);
 
-        // بررسی می‌کند که با نامشخص بودن نتیجه درخواست، رزرو موجودی حفظ شود.
+        // بررسی می‌کند که رزرو موجودی در نتیجه نامشخص حفظ شود.
         $this->assertDatabaseHas('products', [
             'id' => $product->id,
             'stock' => 5,

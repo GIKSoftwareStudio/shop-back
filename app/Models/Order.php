@@ -17,6 +17,7 @@ class Order extends Model
         'status',
         'stock_status',
         'payment_token',
+        'payment_driver',
         'payment_reference',
         'paid_at',
         'verification_started_at',
