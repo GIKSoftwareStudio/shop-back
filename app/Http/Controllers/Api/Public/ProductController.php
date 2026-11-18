@@ -84,7 +84,6 @@ class ProductController extends Controller
             ->getData(true);
 
         $response['products'] = $response['data'];
-        unset($response['data']);
 
         return response()->json($response);
     }

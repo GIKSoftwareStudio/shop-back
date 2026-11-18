@@ -103,7 +103,7 @@ class CheckoutController extends Controller
             }
 
             $order = Order::create([
-                'user_id' => auth()->id(),
+                'user_id' => auth()->id() ?? null,
                 'total_amount' => $amountInToman,
                 'status' => 'pending',
                 'stock_status' => 'reserved',
